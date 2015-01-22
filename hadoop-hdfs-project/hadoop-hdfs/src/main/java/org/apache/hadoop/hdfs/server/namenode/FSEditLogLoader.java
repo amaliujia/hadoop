@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
+import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOp.TruncateOp;
 import static org.apache.hadoop.hdfs.server.namenode.FSImageFormat.renameReservedPathsOnUpgrade;
 import static org.apache.hadoop.util.Time.now;
 
@@ -346,7 +347,7 @@ public class FSEditLogLoader {
       INodeFile oldFile = INodeFile.valueOf(iip.getLastINode(), path, true);
       if (oldFile != null && addCloseOp.overwrite) {
         // This is OP_ADD with overwrite
-        fsDir.unprotectedDelete(path, addCloseOp.mtime);
+        FSDirDeleteOp.deleteForEditLog(fsDir, path, addCloseOp.mtime);
         iip = INodesInPath.replace(iip, iip.length() - 1, null);
         oldFile = null;
       }
@@ -519,8 +520,8 @@ public class FSEditLogLoader {
     }
     case OP_DELETE: {
       DeleteOp deleteOp = (DeleteOp)op;
-      fsDir.unprotectedDelete(
-          renameReservedPathsOnUpgrade(deleteOp.path, logVersion),
+      FSDirDeleteOp.deleteForEditLog(
+          fsDir, renameReservedPathsOnUpgrade(deleteOp.path, logVersion),
           deleteOp.timestamp);
       
       if (toAddRetryCache) {
@@ -851,6 +852,13 @@ public class FSEditLogLoader {
         fsNamesys.addCacheEntry(removeXAttrOp.rpcClientId,
             removeXAttrOp.rpcCallId);
       }
+      break;
+    }
+    case OP_TRUNCATE: {
+      TruncateOp truncateOp = (TruncateOp) op;
+      fsDir.unprotectedTruncate(truncateOp.src, truncateOp.clientName,
+          truncateOp.clientMachine, truncateOp.newLength, truncateOp.timestamp,
+          truncateOp.truncateBlock);
       break;
     }
     case OP_SET_STORAGE_POLICY: {
