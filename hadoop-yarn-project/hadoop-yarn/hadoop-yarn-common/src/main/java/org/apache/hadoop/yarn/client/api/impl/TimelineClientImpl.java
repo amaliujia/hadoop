@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.lang.reflect.UndeclaredThrowableException;
 import java.net.ConnectException;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLConnection;
@@ -45,6 +46,8 @@ import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.SecurityUtil;
+import org.apache.hadoop.security.authentication.client.AuthenticationException;
 import org.apache.hadoop.security.authentication.client.ConnectionConfigurator;
 import org.apache.hadoop.security.ssl.SSLFactory;
 import org.apache.hadoop.security.token.Token;
@@ -106,6 +109,8 @@ public class TimelineClientImpl extends TimelineClient {
   private DelegationTokenAuthenticator authenticator;
   private DelegationTokenAuthenticatedURL.Token token;
   private URI resURI;
+  private UserGroupInformation authUgi;
+  private String doAsUser;
 
   @Private
   @VisibleForTesting
@@ -176,20 +181,7 @@ public class TimelineClientImpl extends TimelineClient {
         try {
           // try perform the op, if fail, keep retrying
           return op.run();
-        }  catch (IOException e) {
-          // We may only throw runtime and IO exceptions. After switching to
-          // Java 1.7, we can merge these two catch blocks into one.
-
-          // break if there's no retries left
-          if (leftRetries == 0) {
-            break;
-          }
-          if (op.shouldRetryOn(e)) {
-            logException(e, leftRetries);
-          } else {
-            throw e;
-          }
-        } catch (RuntimeException e) {
+        } catch (IOException | RuntimeException e) {
           // break if there's no retries left
           if (leftRetries == 0) {
             break;
@@ -263,6 +255,15 @@ public class TimelineClientImpl extends TimelineClient {
   }
 
   protected void serviceInit(Configuration conf) throws Exception {
+    UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
+    UserGroupInformation realUgi = ugi.getRealUser();
+    if (realUgi != null) {
+      authUgi = realUgi;
+      doAsUser = ugi.getShortUserName();
+    } else {
+      authUgi = ugi;
+      doAsUser = null;
+    }
     ClientConfig cc = new DefaultClientConfig();
     cc.getClasses().add(YarnJacksonJaxbJsonProvider.class);
     connConfigurator = newConnConfigurator(conf);
@@ -312,16 +313,20 @@ public class TimelineClientImpl extends TimelineClient {
     doPosting(domain, "domain");
   }
 
-  private ClientResponse doPosting(Object obj, String path) throws IOException, YarnException {
+  private ClientResponse doPosting(final Object obj, final String path)
+      throws IOException, YarnException {
     ClientResponse resp;
     try {
-      resp = doPostingObject(obj, path);
-    } catch (RuntimeException re) {
-      // runtime exception is expected if the client cannot connect the server
-      String msg =
-          "Failed to get the response from the timeline server.";
-      LOG.error(msg, re);
-      throw re;
+      resp = authUgi.doAs(new PrivilegedExceptionAction<ClientResponse>() {
+        @Override
+        public ClientResponse run() throws Exception {
+          return doPostingObject(obj, path);
+        }
+      });
+    } catch (UndeclaredThrowableException e) {
+        throw new IOException(e.getCause());
+    } catch (InterruptedException ie) {
+      throw new IOException(ie);
     }
     if (resp == null ||
         resp.getClientResponseStatus() != ClientResponse.Status.OK) {
@@ -342,11 +347,6 @@ public class TimelineClientImpl extends TimelineClient {
   @Override
   public Token<TimelineDelegationTokenIdentifier> getDelegationToken(
       final String renewer) throws IOException, YarnException {
-    boolean isProxyAccess =
-        UserGroupInformation.getCurrentUser().getAuthenticationMethod()
-        == UserGroupInformation.AuthenticationMethod.PROXY;
-    final String doAsUser = isProxyAccess ?
-        UserGroupInformation.getCurrentUser().getShortUserName() : null;
     PrivilegedExceptionAction<Token<TimelineDelegationTokenIdentifier>> getDTAction =
         new PrivilegedExceptionAction<Token<TimelineDelegationTokenIdentifier>>() {
 
@@ -368,17 +368,14 @@ public class TimelineClientImpl extends TimelineClient {
   public long renewDelegationToken(
       final Token<TimelineDelegationTokenIdentifier> timelineDT)
           throws IOException, YarnException {
-    boolean isProxyAccess =
-        UserGroupInformation.getCurrentUser().getAuthenticationMethod()
-        == UserGroupInformation.AuthenticationMethod.PROXY;
-    final String doAsUser = isProxyAccess ?
-        UserGroupInformation.getCurrentUser().getShortUserName() : null;
+    boolean useHttps = YarnConfiguration.useHttps(this.getConfig());
+    final String scheme = useHttps ? "https" : "http";
+    final InetSocketAddress address = SecurityUtil.getTokenServiceAddr(timelineDT);
     PrivilegedExceptionAction<Long> renewDTAction =
         new PrivilegedExceptionAction<Long>() {
 
           @Override
-          public Long run()
-              throws Exception {
+          public Long run() throws Exception {
             // If the timeline DT to renew is different than cached, replace it.
             // Token to set every time for retry, because when exception happens,
             // DelegationTokenAuthenticatedURL will reset it to null;
@@ -388,8 +385,10 @@ public class TimelineClientImpl extends TimelineClient {
             DelegationTokenAuthenticatedURL authUrl =
                 new DelegationTokenAuthenticatedURL(authenticator,
                     connConfigurator);
+            final URI serviceURI = new URI(scheme, null, address.getHostName(),
+                address.getPort(), RESOURCE_URI_STR, null, null);
             return authUrl
-                .renewDelegationToken(resURI.toURL(), token, doAsUser);
+                .renewDelegationToken(serviceURI.toURL(), token, doAsUser);
           }
         };
     return (Long) operateDelegationToken(renewDTAction);
@@ -400,17 +399,14 @@ public class TimelineClientImpl extends TimelineClient {
   public void cancelDelegationToken(
       final Token<TimelineDelegationTokenIdentifier> timelineDT)
           throws IOException, YarnException {
-    boolean isProxyAccess =
-        UserGroupInformation.getCurrentUser().getAuthenticationMethod()
-        == UserGroupInformation.AuthenticationMethod.PROXY;
-    final String doAsUser = isProxyAccess ?
-        UserGroupInformation.getCurrentUser().getShortUserName() : null;
+    boolean useHttps = YarnConfiguration.useHttps(this.getConfig());
+    final String scheme = useHttps ? "https" : "http";
+    final InetSocketAddress address = SecurityUtil.getTokenServiceAddr(timelineDT);
     PrivilegedExceptionAction<Void> cancelDTAction =
         new PrivilegedExceptionAction<Void>() {
 
           @Override
-          public Void run()
-              throws Exception {
+          public Void run() throws Exception {
             // If the timeline DT to cancel is different than cached, replace it.
             // Token to set every time for retry, because when exception happens,
             // DelegationTokenAuthenticatedURL will reset it to null;
@@ -420,7 +416,9 @@ public class TimelineClientImpl extends TimelineClient {
             DelegationTokenAuthenticatedURL authUrl =
                 new DelegationTokenAuthenticatedURL(authenticator,
                     connConfigurator);
-            authUrl.cancelDelegationToken(resURI.toURL(), token, doAsUser);
+            final URI serviceURI = new URI(scheme, null, address.getHostName(),
+                address.getPort(), RESOURCE_URI_STR, null, null);
+            authUrl.cancelDelegationToken(serviceURI.toURL(), token, doAsUser);
             return null;
           }
         };
@@ -436,14 +434,9 @@ public class TimelineClientImpl extends TimelineClient {
       @Override
       public Object run() throws IOException {
         // Try pass the request, if fail, keep retrying
-        boolean isProxyAccess =
-            UserGroupInformation.getCurrentUser().getAuthenticationMethod()
-            == UserGroupInformation.AuthenticationMethod.PROXY;
-        UserGroupInformation callerUGI = isProxyAccess ?
-            UserGroupInformation.getCurrentUser().getRealUser()
-            : UserGroupInformation.getCurrentUser();
+        authUgi.checkTGTAndReloginFromKeytab();
         try {
-          return callerUGI.doAs(action);
+          return authUgi.doAs(action);
         } catch (UndeclaredThrowableException e) {
           throw new IOException(e.getCause());
         } catch (InterruptedException e) {
@@ -483,27 +476,15 @@ public class TimelineClientImpl extends TimelineClient {
 
     @Override
     public HttpURLConnection getHttpURLConnection(final URL url) throws IOException {
-      boolean isProxyAccess =
-          UserGroupInformation.getCurrentUser().getAuthenticationMethod()
-          == UserGroupInformation.AuthenticationMethod.PROXY;
-      UserGroupInformation callerUGI = isProxyAccess ?
-          UserGroupInformation.getCurrentUser().getRealUser()
-          : UserGroupInformation.getCurrentUser();
-      final String doAsUser = isProxyAccess ?
-          UserGroupInformation.getCurrentUser().getShortUserName() : null;
+      authUgi.checkTGTAndReloginFromKeytab();
       try {
-        return callerUGI.doAs(new PrivilegedExceptionAction<HttpURLConnection>() {
-          @Override
-          public HttpURLConnection run() throws Exception {
-            return new DelegationTokenAuthenticatedURL(
-                authenticator, connConfigurator).openConnection(url, token,
-                doAsUser);
-          }
-        });
+        return new DelegationTokenAuthenticatedURL(
+            authenticator, connConfigurator).openConnection(url, token,
+              doAsUser);
       } catch (UndeclaredThrowableException e) {
         throw new IOException(e.getCause());
-      } catch (InterruptedException e) {
-        throw new IOException(e);
+      } catch (AuthenticationException ae) {
+        throw new IOException(ae);
       }
     }
 

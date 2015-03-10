@@ -31,10 +31,17 @@ import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.QueueState;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
+import org.apache.hadoop.yarn.security.AccessType;
+import org.apache.hadoop.yarn.security.PrivilegedEntity;
+import org.apache.hadoop.yarn.security.PrivilegedEntity.EntityType;
+import org.apache.hadoop.yarn.security.YarnAuthorizationProvider;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceLimits;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceUsage;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.Resources;
@@ -45,43 +52,38 @@ public abstract class AbstractCSQueue implements CSQueue {
   
   CSQueue parent;
   final String queueName;
-  
-  float capacity;
-  float maximumCapacity;
-  float absoluteCapacity;
-  float absoluteMaxCapacity;
-  float absoluteUsedCapacity = 0.0f;
-
-  float usedCapacity = 0.0f;
   volatile int numContainers;
   
   final Resource minimumAllocation;
-  final Resource maximumAllocation;
+  Resource maximumAllocation;
   QueueState state;
   final QueueMetrics metrics;
-  
+  protected final PrivilegedEntity queueEntity;
+
   final ResourceCalculator resourceCalculator;
   Set<String> accessibleLabels;
   RMNodeLabelsManager labelManager;
   String defaultLabelExpression;
-  Resource usedResources = Resources.createResource(0, 0);
-  Map<String, Float> absoluteCapacityByNodeLabels;
-  Map<String, Float> capacitiyByNodeLabels;
-  Map<String, Resource> usedResourcesByNodeLabels = new HashMap<String, Resource>();
-  Map<String, Float> absoluteMaxCapacityByNodeLabels;
-  Map<String, Float> maxCapacityByNodeLabels;
   
-  Map<QueueACL, AccessControlList> acls = 
-      new HashMap<QueueACL, AccessControlList>();
+  Map<AccessType, AccessControlList> acls = 
+      new HashMap<AccessType, AccessControlList>();
   boolean reservationsContinueLooking;
+  private boolean preemptionDisabled;
+
+  // Track resource usage-by-label like used-resource/pending-resource, etc.
+  ResourceUsage queueUsage;
+  
+  // Track capacities like used-capcity/abs-used-capacity/capacity/abs-capacity,
+  // etc.
+  QueueCapacities queueCapacities;
   
   private final RecordFactory recordFactory = 
       RecordFactoryProvider.getRecordFactory(null);
-  
+  protected CapacitySchedulerContext csContext;
+  protected YarnAuthorizationProvider authorizer = null;
+
   public AbstractCSQueue(CapacitySchedulerContext cs, 
       String queueName, CSQueue parent, CSQueue old) throws IOException {
-    this.minimumAllocation = cs.getMinimumResourceCapability();
-    this.maximumAllocation = cs.getMaximumResourceCapability();
     this.labelManager = cs.getRMContext().getNodeLabelManager();
     this.parent = parent;
     this.queueName = queueName;
@@ -92,69 +94,61 @@ public abstract class AbstractCSQueue implements CSQueue {
         QueueMetrics.forQueue(getQueuePath(), parent,
             cs.getConfiguration().getEnableUserMetrics(),
             cs.getConf());
-    
-    // get labels
-    this.accessibleLabels = cs.getConfiguration().getAccessibleNodeLabels(getQueuePath());
-    this.defaultLabelExpression = cs.getConfiguration()
-        .getDefaultNodeLabelExpression(getQueuePath());
 
-    // inherit from parent if labels not set
-    if (this.accessibleLabels == null && parent != null) {
-      this.accessibleLabels = parent.getAccessibleNodeLabels();
-    }
-    SchedulerUtils.checkIfLabelInClusterNodeLabels(labelManager,
-        this.accessibleLabels);
+    this.csContext = cs;
+    this.minimumAllocation = csContext.getMinimumResourceCapability();
     
-    // inherit from parent if labels not set
-    if (this.defaultLabelExpression == null && parent != null
-        && this.accessibleLabels.containsAll(parent.getAccessibleNodeLabels())) {
-      this.defaultLabelExpression = parent.getDefaultNodeLabelExpression();
-    }
+    // initialize ResourceUsage
+    queueUsage = new ResourceUsage();
+    queueEntity = new PrivilegedEntity(EntityType.QUEUE, getQueuePath());
     
-    // set capacity by labels
-    capacitiyByNodeLabels =
-        cs.getConfiguration().getNodeLabelCapacities(getQueuePath(), accessibleLabels,
-            labelManager);
-
-    // set maximum capacity by labels
-    maxCapacityByNodeLabels =
-        cs.getConfiguration().getMaximumNodeLabelCapacities(getQueuePath(),
-            accessibleLabels, labelManager);
+    // initialize QueueCapacities
+    queueCapacities = new QueueCapacities(parent == null);    
+  }
+  
+  protected void setupConfigurableCapacities() {
+    CSQueueUtils.loadUpdateAndCheckCapacities(
+        getQueuePath(),
+        accessibleLabels, 
+        csContext.getConfiguration(), 
+        queueCapacities,
+        parent == null ? null : parent.getQueueCapacities(), 
+        csContext.getRMContext().getNodeLabelManager());
   }
   
   @Override
   public synchronized float getCapacity() {
-    return capacity;
+    return queueCapacities.getCapacity();
   }
 
   @Override
   public synchronized float getAbsoluteCapacity() {
-    return absoluteCapacity;
+    return queueCapacities.getAbsoluteCapacity();
   }
 
   @Override
   public float getAbsoluteMaximumCapacity() {
-    return absoluteMaxCapacity;
+    return queueCapacities.getAbsoluteMaximumCapacity();
   }
 
   @Override
   public synchronized float getAbsoluteUsedCapacity() {
-    return absoluteUsedCapacity;
+    return queueCapacities.getAbsoluteUsedCapacity();
   }
 
   @Override
   public float getMaximumCapacity() {
-    return maximumCapacity;
+    return queueCapacities.getMaximumCapacity();
   }
 
   @Override
   public synchronized float getUsedCapacity() {
-    return usedCapacity;
+    return queueCapacities.getUsedCapacity();
   }
 
   @Override
-  public synchronized Resource getUsedResources() {
-    return usedResources;
+  public Resource getUsedResources() {
+    return queueUsage.getUsed();
   }
 
   public synchronized int getNumContainers() {
@@ -175,7 +169,11 @@ public abstract class AbstractCSQueue implements CSQueue {
   public String getQueueName() {
     return queueName;
   }
-  
+
+  public PrivilegedEntity getPrivilegedEntity() {
+    return queueEntity;
+  }
+
   @Override
   public synchronized CSQueue getParent() {
     return parent;
@@ -189,30 +187,21 @@ public abstract class AbstractCSQueue implements CSQueue {
   public Set<String> getAccessibleNodeLabels() {
     return accessibleLabels;
   }
-  
+
   @Override
   public boolean hasAccess(QueueACL acl, UserGroupInformation user) {
-    synchronized (this) {
-      if (acls.get(acl).isUserAllowed(user)) {
-        return true;
-      }
-    }
-    
-    if (parent != null) {
-      return parent.hasAccess(acl, user);
-    }
-    
-    return false;
+    return authorizer.checkPermission(SchedulerUtils.toAccessType(acl),
+      queueEntity, user);
   }
-  
+
   @Override
   public synchronized void setUsedCapacity(float usedCapacity) {
-    this.usedCapacity = usedCapacity;
+    queueCapacities.setUsedCapacity(usedCapacity);
   }
   
   @Override
   public synchronized void setAbsoluteUsedCapacity(float absUsedCapacity) {
-    this.absoluteUsedCapacity = absUsedCapacity;
+    queueCapacities.setAbsoluteUsedCapacity(absUsedCapacity);
   }
 
   /**
@@ -221,21 +210,16 @@ public abstract class AbstractCSQueue implements CSQueue {
    */
   synchronized void setMaxCapacity(float maximumCapacity) {
     // Sanity check
-    CSQueueUtils.checkMaxCapacity(getQueueName(), capacity, maximumCapacity);
+    CSQueueUtils.checkMaxCapacity(getQueueName(),
+        queueCapacities.getCapacity(), maximumCapacity);
     float absMaxCapacity =
         CSQueueUtils.computeAbsoluteMaximumCapacity(maximumCapacity, parent);
-    CSQueueUtils.checkAbsoluteCapacity(getQueueName(), absoluteCapacity,
+    CSQueueUtils.checkAbsoluteCapacity(getQueueName(),
+        queueCapacities.getAbsoluteCapacity(),
         absMaxCapacity);
     
-    this.maximumCapacity = maximumCapacity;
-    this.absoluteMaxCapacity = absMaxCapacity;
-  }
-
-  @Override
-  public float getAbsActualCapacity() {
-    // for now, simply return actual capacity = guaranteed capacity for parent
-    // queue
-    return absoluteCapacity;
+    queueCapacities.setMaximumCapacity(maximumCapacity);
+    queueCapacities.setAbsoluteMaximumCapacity(absMaxCapacity);
   }
 
   @Override
@@ -243,39 +227,38 @@ public abstract class AbstractCSQueue implements CSQueue {
     return defaultLabelExpression;
   }
   
-  synchronized void setupQueueConfigs(Resource clusterResource, float capacity,
-      float absoluteCapacity, float maximumCapacity, float absoluteMaxCapacity,
-      QueueState state, Map<QueueACL, AccessControlList> acls,
-      Set<String> labels, String defaultLabelExpression,
-      Map<String, Float> nodeLabelCapacities,
-      Map<String, Float> maximumNodeLabelCapacities,
-      boolean reservationContinueLooking)
+  synchronized void setupQueueConfigs(Resource clusterResource)
       throws IOException {
-    // Sanity check
-    CSQueueUtils.checkMaxCapacity(getQueueName(), capacity, maximumCapacity);
-    CSQueueUtils.checkAbsoluteCapacity(getQueueName(), absoluteCapacity,
-        absoluteMaxCapacity);
+    // get labels
+    this.accessibleLabels =
+        csContext.getConfiguration().getAccessibleNodeLabels(getQueuePath());
+    this.defaultLabelExpression = csContext.getConfiguration()
+        .getDefaultNodeLabelExpression(getQueuePath());
 
-    this.capacity = capacity;
-    this.absoluteCapacity = absoluteCapacity;
-
-    this.maximumCapacity = maximumCapacity;
-    this.absoluteMaxCapacity = absoluteMaxCapacity;
-
-    this.state = state;
-
-    this.acls = acls;
+    // inherit from parent if labels not set
+    if (this.accessibleLabels == null && parent != null) {
+      this.accessibleLabels = parent.getAccessibleNodeLabels();
+    }
+    SchedulerUtils.checkIfLabelInClusterNodeLabels(labelManager,
+        this.accessibleLabels);
     
-    // set labels
-    this.accessibleLabels = labels;
+    // inherit from parent if labels not set
+    if (this.defaultLabelExpression == null && parent != null
+        && this.accessibleLabels.containsAll(parent.getAccessibleNodeLabels())) {
+      this.defaultLabelExpression = parent.getDefaultNodeLabelExpression();
+    }
+
+    // After we setup labels, we can setup capacities
+    setupConfigurableCapacities();
     
-    // set label expression
-    this.defaultLabelExpression = defaultLabelExpression;
+    this.maximumAllocation =
+        csContext.getConfiguration().getMaximumAllocationPerQueue(
+            getQueuePath());
     
-    // copy node label capacity
-    this.capacitiyByNodeLabels = new HashMap<String, Float>(nodeLabelCapacities);
-    this.maxCapacityByNodeLabels =
-        new HashMap<String, Float>(maximumNodeLabelCapacities);
+    authorizer = YarnAuthorizationProvider.getInstance(csContext.getConf());
+    
+    this.state = csContext.getConfiguration().getState(getQueuePath());
+    this.acls = csContext.getConfiguration().getAcls(getQueuePath());
 
     // Update metrics
     CSQueueUtils.updateQueueStatistics(
@@ -302,30 +285,19 @@ public abstract class AbstractCSQueue implements CSQueue {
         }
       }
     }
-    
-    // calculate absolute capacity by each node label
-    this.absoluteCapacityByNodeLabels =
-        CSQueueUtils.computeAbsoluteCapacityByNodeLabels(
-            this.capacitiyByNodeLabels, parent);
-    
-    // calculate maximum capacity by each node label
-    this.absoluteMaxCapacityByNodeLabels =
-        CSQueueUtils.computeAbsoluteMaxCapacityByNodeLabels(
-            maximumNodeLabelCapacities, parent);
-    
-    // check absoluteMaximumNodeLabelCapacities is valid
-    CSQueueUtils.checkAbsoluteCapacitiesByLabel(getQueueName(),
-        absoluteCapacityByNodeLabels, absoluteCapacityByNodeLabels);
-    
-    this.reservationsContinueLooking = reservationContinueLooking;
+
+    this.reservationsContinueLooking = csContext.getConfiguration()
+        .getReservationContinueLook();
+
+    this.preemptionDisabled = isQueueHierarchyPreemptionDisabled(this);
   }
   
   protected QueueInfo getQueueInfo() {
     QueueInfo queueInfo = recordFactory.newRecordInstance(QueueInfo.class);
     queueInfo.setQueueName(queueName);
     queueInfo.setAccessibleNodeLabels(accessibleLabels);
-    queueInfo.setCapacity(capacity);
-    queueInfo.setMaximumCapacity(maximumCapacity);
+    queueInfo.setCapacity(queueCapacities.getCapacity());
+    queueInfo.setMaximumCapacity(queueCapacities.getMaximumCapacity());
     queueInfo.setQueueState(state);
     queueInfo.setDefaultNodeLabelExpression(defaultLabelExpression);
     queueInfo.setCurrentCapacity(getUsedCapacity());
@@ -333,7 +305,7 @@ public abstract class AbstractCSQueue implements CSQueue {
   }
   
   @Private
-  public Resource getMaximumAllocation() {
+  public synchronized Resource getMaximumAllocation() {
     return maximumAllocation;
   }
   
@@ -344,22 +316,13 @@ public abstract class AbstractCSQueue implements CSQueue {
   
   synchronized void allocateResource(Resource clusterResource, 
       Resource resource, Set<String> nodeLabels) {
-    Resources.addTo(usedResources, resource);
     
     // Update usedResources by labels
     if (nodeLabels == null || nodeLabels.isEmpty()) {
-      if (!usedResourcesByNodeLabels.containsKey(RMNodeLabelsManager.NO_LABEL)) {
-        usedResourcesByNodeLabels.put(RMNodeLabelsManager.NO_LABEL,
-            Resources.createResource(0));
-      }
-      Resources.addTo(usedResourcesByNodeLabels.get(RMNodeLabelsManager.NO_LABEL),
-          resource);
+      queueUsage.incUsed(resource);
     } else {
       for (String label : Sets.intersection(accessibleLabels, nodeLabels)) {
-        if (!usedResourcesByNodeLabels.containsKey(label)) {
-          usedResourcesByNodeLabels.put(label, Resources.createResource(0));
-        }
-        Resources.addTo(usedResourcesByNodeLabels.get(label), resource);
+        queueUsage.incUsed(label, resource);
       }
     }
 
@@ -370,23 +333,12 @@ public abstract class AbstractCSQueue implements CSQueue {
   
   protected synchronized void releaseResource(Resource clusterResource,
       Resource resource, Set<String> nodeLabels) {
-    // Update queue metrics
-    Resources.subtractFrom(usedResources, resource);
-
     // Update usedResources by labels
     if (null == nodeLabels || nodeLabels.isEmpty()) {
-      if (!usedResourcesByNodeLabels.containsKey(RMNodeLabelsManager.NO_LABEL)) {
-        usedResourcesByNodeLabels.put(RMNodeLabelsManager.NO_LABEL,
-            Resources.createResource(0));
-      }
-      Resources.subtractFrom(
-          usedResourcesByNodeLabels.get(RMNodeLabelsManager.NO_LABEL), resource);
+      queueUsage.decUsed(resource);
     } else {
       for (String label : Sets.intersection(accessibleLabels, nodeLabels)) {
-        if (!usedResourcesByNodeLabels.containsKey(label)) {
-          usedResourcesByNodeLabels.put(label, Resources.createResource(0));
-        }
-        Resources.subtractFrom(usedResourcesByNodeLabels.get(label), resource);
+        queueUsage.decUsed(label, resource);
       }
     }
 
@@ -396,62 +348,79 @@ public abstract class AbstractCSQueue implements CSQueue {
   }
   
   @Private
-  public float getCapacityByNodeLabel(String label) {
-    if (StringUtils.equals(label, RMNodeLabelsManager.NO_LABEL)) {
-      if (null == parent) {
-        return 1f;
-      }
-      return getCapacity();
-    }
-    
-    if (!capacitiyByNodeLabels.containsKey(label)) {
-      return 0f;
-    } else {
-      return capacitiyByNodeLabels.get(label);
-    }
-  }
-  
-  @Private
-  public float getAbsoluteCapacityByNodeLabel(String label) {
-    if (StringUtils.equals(label, RMNodeLabelsManager.NO_LABEL)) {
-      if (null == parent) {
-        return 1f; 
-      }
-      return getAbsoluteCapacity();
-    }
-    
-    if (!absoluteCapacityByNodeLabels.containsKey(label)) {
-      return 0f;
-    } else {
-      return absoluteCapacityByNodeLabels.get(label);
-    }
-  }
-  
-  @Private
-  public float getAbsoluteMaximumCapacityByNodeLabel(String label) {
-    if (StringUtils.equals(label, RMNodeLabelsManager.NO_LABEL)) {
-      return getAbsoluteMaximumCapacity();
-    }
-    
-    if (!absoluteMaxCapacityByNodeLabels.containsKey(label)) {
-      return 0f;
-    } else {
-      return absoluteMaxCapacityByNodeLabels.get(label);
-    }
-  }
-  
-  @Private
   public boolean getReservationContinueLooking() {
     return reservationsContinueLooking;
   }
   
   @Private
-  public Map<QueueACL, AccessControlList> getACLs() {
+  public Map<AccessType, AccessControlList> getACLs() {
     return acls;
+  }
+
+  @Private
+  public boolean getPreemptionDisabled() {
+    return preemptionDisabled;
   }
   
   @Private
-  public Resource getUsedResourceByLabel(String nodeLabel) {
-    return usedResourcesByNodeLabels.get(nodeLabel);
+  public QueueCapacities getQueueCapacities() {
+    return queueCapacities;
+  }
+  
+  @Private
+  public ResourceUsage getQueueResourceUsage() {
+    return queueUsage;
+  }
+
+  /**
+   * The specified queue is preemptable if system-wide preemption is turned on
+   * unless any queue in the <em>qPath</em> hierarchy has explicitly turned
+   * preemption off.
+   * NOTE: Preemptability is inherited from a queue's parent.
+   * 
+   * @return true if queue has preemption disabled, false otherwise
+   */
+  private boolean isQueueHierarchyPreemptionDisabled(CSQueue q) {
+    CapacitySchedulerConfiguration csConf = csContext.getConfiguration();
+    boolean systemWidePreemption =
+        csConf.getBoolean(YarnConfiguration.RM_SCHEDULER_ENABLE_MONITORS,
+                       YarnConfiguration.DEFAULT_RM_SCHEDULER_ENABLE_MONITORS);
+    CSQueue parentQ = q.getParent();
+
+    // If the system-wide preemption switch is turned off, all of the queues in
+    // the qPath hierarchy have preemption disabled, so return true.
+    if (!systemWidePreemption) return true;
+
+    // If q is the root queue and the system-wide preemption switch is turned
+    // on, then q does not have preemption disabled (default=false, below)
+    // unless the preemption_disabled property is explicitly set.
+    if (parentQ == null) {
+      return csConf.getPreemptionDisabled(q.getQueuePath(), false);
+    }
+
+    // If this is not the root queue, inherit the default value for the
+    // preemption_disabled property from the parent. Preemptability will be
+    // inherited from the parent's hierarchy unless explicitly overridden at
+    // this level.
+    return csConf.getPreemptionDisabled(q.getQueuePath(),
+                                        parentQ.getPreemptionDisabled());
+  }
+  
+  protected Resource getCurrentResourceLimit(Resource clusterResource,
+      ResourceLimits currentResourceLimits) {
+    /*
+     * Queue's max available resource = min(my.max, my.limit)
+     * my.limit is set by my parent, considered used resource of my siblings
+     */
+    Resource queueMaxResource =
+        Resources.multiplyAndNormalizeDown(resourceCalculator, clusterResource,
+            queueCapacities.getAbsoluteMaximumCapacity(), minimumAllocation);
+    Resource queueCurrentResourceLimit =
+        Resources.min(resourceCalculator, clusterResource, queueMaxResource,
+            currentResourceLimits.getLimit());
+    queueCurrentResourceLimit =
+        Resources.roundDown(resourceCalculator, queueCurrentResourceLimit,
+            minimumAllocation);
+    return queueCurrentResourceLimit;
   }
 }

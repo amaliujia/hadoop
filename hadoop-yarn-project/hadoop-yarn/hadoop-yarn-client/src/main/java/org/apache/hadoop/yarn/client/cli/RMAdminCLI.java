@@ -19,6 +19,7 @@
 package org.apache.hadoop.yarn.client.cli;
 
 import java.io.IOException;
+import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -59,6 +60,7 @@ import org.apache.hadoop.yarn.server.api.protocolrecords.RemoveFromClusterNodeLa
 import org.apache.hadoop.yarn.server.api.protocolrecords.ReplaceLabelsOnNodeRequest;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 
 @Private
@@ -100,8 +102,11 @@ public class RMAdminCLI extends HAAdmin {
               new UsageInfo("[label1,label2,label3] (label splitted by \",\")",
                   "remove from cluster node labels"))
           .put("-replaceLabelsOnNode",
-              new UsageInfo("[node1:port,label1,label2 node2:port,label1,label2]",
-                  "replace labels on nodes"))
+              new UsageInfo(
+                  "[node1[:port]=label1,label2 node2[:port]=label1,label2]",
+                  "replace labels on nodes"
+                      + " (please note that we do not support specifying multiple"
+                      + " labels on a single host for now.)"))
           .put("-directlyAccessNodeLabelStore",
               new UsageInfo("", "Directly access node label store, "
                   + "with this option, all node label related operations"
@@ -123,13 +128,17 @@ public class RMAdminCLI extends HAAdmin {
     super(conf);
   }
 
+  protected void setErrOut(PrintStream errOut) {
+    this.errOut = errOut;
+  }
+
   private static void appendHAUsage(final StringBuilder usageBuilder) {
-    for (String cmdKey : USAGE.keySet()) {
-      if (cmdKey.equals("-help")) {
+    for (Map.Entry<String,UsageInfo> cmdEntry : USAGE.entrySet()) {
+      if (cmdEntry.getKey().equals("-help")) {
         continue;
       }
-      UsageInfo usageInfo = USAGE.get(cmdKey);
-      usageBuilder.append(" [" + cmdKey + " " + usageInfo.args + "]");
+      UsageInfo usageInfo = cmdEntry.getValue();
+      usageBuilder.append(" [" + cmdEntry.getKey() + " " + usageInfo.args + "]");
     }
   }
 
@@ -169,14 +178,15 @@ public class RMAdminCLI extends HAAdmin {
   private static void buildUsageMsg(StringBuilder builder,
       boolean isHAEnabled) {
     builder.append("Usage: yarn rmadmin\n");
-    for (String cmdKey : ADMIN_USAGE.keySet()) {
-      UsageInfo usageInfo = ADMIN_USAGE.get(cmdKey);
-      builder.append("   " + cmdKey + " " + usageInfo.args + "\n");
+    for (Map.Entry<String,UsageInfo> cmdEntry : ADMIN_USAGE.entrySet()) {
+      UsageInfo usageInfo = cmdEntry.getValue();
+      builder.append("   " + cmdEntry.getKey() + " " + usageInfo.args + "\n");
     }
     if (isHAEnabled) {
-      for (String cmdKey : USAGE.keySet()) {
+      for (Map.Entry<String,UsageInfo> cmdEntry : USAGE.entrySet()) {
+        String cmdKey = cmdEntry.getKey();
         if (!cmdKey.equals("-help")) {
-          UsageInfo usageInfo = USAGE.get(cmdKey);
+          UsageInfo usageInfo = cmdEntry.getValue();
           builder.append("   " + cmdKey + " " + usageInfo.args + "\n");
         }
       }
@@ -199,7 +209,7 @@ public class RMAdminCLI extends HAAdmin {
       " [-getGroup [username]]" +
       " [[-addToClusterNodeLabels [label1,label2,label3]]" +
       " [-removeFromClusterNodeLabels [label1,label2,label3]]" +
-      " [-replaceLabelsOnNode [node1:port,label1,label2 node2:port,label1]" +
+      " [-replaceLabelsOnNode [node1[:port]=label1,label2 node2[:port]=label1]" +
       " [-directlyAccessNodeLabelStore]]");
     if (isHAEnabled) {
       appendHAUsage(summary);
@@ -388,8 +398,7 @@ public class RMAdminCLI extends HAAdmin {
     return 0;
   }
   
-  private Map<NodeId, Set<String>> buildNodeLabelsMapFromStr(String args)
-      throws IOException {
+  private Map<NodeId, Set<String>> buildNodeLabelsMapFromStr(String args) {
     Map<NodeId, Set<String>> map = new HashMap<NodeId, Set<String>>();
 
     for (String nodeToLabels : args.split("[ \n]")) {
@@ -398,21 +407,35 @@ public class RMAdminCLI extends HAAdmin {
         continue;
       }
 
-      String[] splits = nodeToLabels.split(",");
-      String nodeIdStr = splits[0];
-
-      if (nodeIdStr.trim().isEmpty()) {
-        throw new IOException("node name cannot be empty");
+      // "," also supported for compatibility
+      String[] splits = nodeToLabels.split("=");
+      int index = 0;
+      if (splits.length != 2) {
+        splits = nodeToLabels.split(",");
+        index = 1;
       }
+
+      String nodeIdStr = splits[0];
+      if (index == 0) {
+        splits = splits[1].split(",");
+      }
+      
+      Preconditions.checkArgument(!nodeIdStr.trim().isEmpty(),
+          "node name cannot be empty");
 
       NodeId nodeId = ConverterUtils.toNodeIdWithDefaultPort(nodeIdStr);
       map.put(nodeId, new HashSet<String>());
 
-      for (int i = 1; i < splits.length; i++) {
+      for (int i = index; i < splits.length; i++) {
         if (!splits[i].trim().isEmpty()) {
           map.get(nodeId).add(splits[i].trim());
         }
       }
+      
+      int nLabels = map.get(nodeId).size();
+      Preconditions.checkArgument(nLabels <= 1, "%d labels specified on host=%s"
+          + ", please note that we do not support specifying multiple"
+          + " labels on a single host for now.", nLabels, nodeIdStr);
     }
 
     if (map.isEmpty()) {
@@ -620,6 +643,11 @@ public class RMAdminCLI extends HAAdmin {
       throw new YarnRuntimeException(
           "Could not connect to RM HA Admin for node " + rmId);
     }
+  }
+  
+  @Override
+  protected String getUsageString() {
+    return "Usage: rmadmin";
   }
 
   public static void main(String[] args) throws Exception {

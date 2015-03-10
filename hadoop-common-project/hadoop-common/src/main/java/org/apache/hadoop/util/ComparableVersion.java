@@ -9,8 +9,6 @@
 //      to
 //        package org.apache.hadoop.util;
 //   2. Removed author tags to clear hadoop author tag warning
-//        author <a href="mailto:kenney@apache.org">Kenney Westerhof</a>
-//        author <a href="mailto:hboutemy@apache.org">Hervé Boutemy</a>
 //
 package org.apache.hadoop.util;
 
@@ -39,7 +37,6 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.ListIterator;
-import java.util.Locale;
 import java.util.Properties;
 import java.util.Stack;
 
@@ -365,7 +362,7 @@ public class ComparableVersion
 
         items = new ListItem();
 
-        version = version.toLowerCase( Locale.ENGLISH );
+        version = StringUtils.toLowerCase(version);
 
         ListItem list = items;
 

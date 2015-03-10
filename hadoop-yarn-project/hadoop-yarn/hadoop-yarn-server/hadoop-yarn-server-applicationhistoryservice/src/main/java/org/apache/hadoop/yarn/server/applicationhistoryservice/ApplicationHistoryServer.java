@@ -33,6 +33,7 @@ import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.service.CompositeService;
 import org.apache.hadoop.service.Service;
 import org.apache.hadoop.util.ExitUtil;
+import org.apache.hadoop.util.GenericOptionsParser;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.ShutdownHookManager;
 import org.apache.hadoop.util.StringUtils;
@@ -153,6 +154,7 @@ public class ApplicationHistoryServer extends CompositeService {
         new CompositeServiceShutdownHook(appHistoryServer),
         SHUTDOWN_HOOK_PRIORITY);
       YarnConfiguration conf = new YarnConfiguration();
+      new GenericOptionsParser(conf, args);
       appHistoryServer.init(conf);
       appHistoryServer.start();
     } catch (Throwable t) {
@@ -270,7 +272,7 @@ public class ApplicationHistoryServer extends CompositeService {
             .$for("applicationhistory", ApplicationHistoryClientService.class,
                 ahsClientService, "ws")
             .with(conf).at(bindAddress).start(
-                new AHSWebApp(timelineDataManager, historyManager));
+                new AHSWebApp(timelineDataManager, ahsClientService));
     } catch (Exception e) {
       String msg = "AHSWebApp failed to start.";
       LOG.error(msg, e);

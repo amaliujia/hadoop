@@ -22,7 +22,6 @@ import java.io.BufferedOutputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
@@ -80,10 +79,10 @@ import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.security.token.TokenSelector;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSelector;
 import org.apache.hadoop.util.Progressable;
-import org.mortbay.util.ajax.JSON;
+import org.apache.hadoop.util.StringUtils;
+import org.codehaus.jackson.map.ObjectMapper;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Charsets;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 
@@ -312,16 +311,21 @@ public class WebHdfsFileSystem extends FileSystem
     if (in == null) {
       throw new IOException("The " + (useErrorStream? "error": "input") + " stream is null.");
     }
-    final String contentType = c.getContentType();
-    if (contentType != null) {
-      final MediaType parsed = MediaType.valueOf(contentType);
-      if (!MediaType.APPLICATION_JSON_TYPE.isCompatible(parsed)) {
-        throw new IOException("Content-Type \"" + contentType
-            + "\" is incompatible with \"" + MediaType.APPLICATION_JSON
-            + "\" (parsed=\"" + parsed + "\")");
+    try {
+      final String contentType = c.getContentType();
+      if (contentType != null) {
+        final MediaType parsed = MediaType.valueOf(contentType);
+        if (!MediaType.APPLICATION_JSON_TYPE.isCompatible(parsed)) {
+          throw new IOException("Content-Type \"" + contentType
+              + "\" is incompatible with \"" + MediaType.APPLICATION_JSON
+              + "\" (parsed=\"" + parsed + "\")");
+        }
       }
+      ObjectMapper mapper = new ObjectMapper();
+      return mapper.reader(Map.class).readValue(in);
+    } finally {
+      in.close();
     }
-    return (Map<?, ?>)JSON.parse(new InputStreamReader(in, Charsets.UTF_8));
   }
 
   private static Map<?, ?> validateResponse(final HttpOpParam.Op op,
@@ -1157,6 +1161,14 @@ public class WebHdfsFileSystem extends FileSystem
   }
 
   @Override
+  public boolean truncate(Path f, long newLength) throws IOException {
+    statistics.incrementWriteOps(1);
+
+    final HttpOpParam.Op op = PostOpParam.Op.TRUNCATE;
+    return new FsPathBooleanRunner(op, f, new NewLengthParam(newLength)).run();
+  }
+
+  @Override
   public boolean delete(Path f, boolean recursive) throws IOException {
     final HttpOpParam.Op op = DeleteOpParam.Op.DELETE;
     return new FsPathBooleanRunner(op, f,
@@ -1230,7 +1242,7 @@ public class WebHdfsFileSystem extends FileSystem
     if (query == null) {
       return url;
     }
-    final String lower = query.toLowerCase();
+    final String lower = StringUtils.toLowerCase(query);
     if (!lower.startsWith(OFFSET_PARAM_PREFIX)
         && !lower.contains("&" + OFFSET_PARAM_PREFIX)) {
       return url;
@@ -1241,7 +1253,7 @@ public class WebHdfsFileSystem extends FileSystem
     for(final StringTokenizer st = new StringTokenizer(query, "&");
         st.hasMoreTokens();) {
       final String token = st.nextToken();
-      if (!token.toLowerCase().startsWith(OFFSET_PARAM_PREFIX)) {
+      if (!StringUtils.toLowerCase(token).startsWith(OFFSET_PARAM_PREFIX)) {
         if (b == null) {
           b = new StringBuilder("?").append(token);
         } else {
@@ -1278,13 +1290,15 @@ public class WebHdfsFileSystem extends FileSystem
       @Override
       FileStatus[] decodeResponse(Map<?,?> json) {
         final Map<?, ?> rootmap = (Map<?, ?>)json.get(FileStatus.class.getSimpleName() + "es");
-        final Object[] array = (Object[])rootmap.get(FileStatus.class.getSimpleName());
+        final List<?> array = JsonUtil.getList(
+            rootmap, FileStatus.class.getSimpleName());
 
         //convert FileStatus
-        final FileStatus[] statuses = new FileStatus[array.length];
-        for (int i = 0; i < array.length; i++) {
-          final Map<?, ?> m = (Map<?, ?>)array[i];
-          statuses[i] = makeQualified(JsonUtil.toFileStatus(m, false), f);
+        final FileStatus[] statuses = new FileStatus[array.size()];
+        int i = 0;
+        for (Object object : array) {
+          final Map<?, ?> m = (Map<?, ?>) object;
+          statuses[i++] = makeQualified(JsonUtil.toFileStatus(m, false), f);
         }
         return statuses;
       }
@@ -1335,7 +1349,7 @@ public class WebHdfsFileSystem extends FileSystem
         new TokenArgumentParam(token.encodeToUrlString())) {
       @Override
       Long decodeResponse(Map<?,?> json) throws IOException {
-        return (Long) json.get("long");
+        return ((Number) json.get("long")).longValue();
       }
     }.run();
   }

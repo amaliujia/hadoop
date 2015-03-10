@@ -69,6 +69,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.ha.HAServiceProtocol.RequestSource;
 import org.apache.hadoop.ha.HAServiceProtocol.StateChangeRequestInfo;
 import org.apache.hadoop.ha.ServiceFailedException;
@@ -1191,7 +1192,9 @@ public class MiniDFSCluster {
         } catch (InterruptedException e) {
         }
         if (++i > 10) {
-          throw new IOException("Timed out waiting for Mini HDFS Cluster to start");
+          final String msg = "Timed out waiting for Mini HDFS Cluster to start";
+          LOG.error(msg);
+          throw new IOException(msg);
         }
       }
     }
@@ -1866,6 +1869,16 @@ public class MiniDFSCluster {
     return null;
   }
 
+  public byte[] readBlockOnDataNodeAsBytes(int i, ExtendedBlock block)
+      throws IOException {
+    assert (i >= 0 && i < dataNodes.size()) : "Invalid datanode "+i;
+    File blockFile = getBlockFile(i, block);
+    if (blockFile != null && blockFile.exists()) {
+      return DFSTestUtil.readFileAsBytes(blockFile);
+    }
+    return null;
+  }
+
   /**
    * Corrupt a block on a particular datanode.
    *
@@ -1923,6 +1936,9 @@ public class MiniDFSCluster {
 
   /*
    * Shutdown a particular datanode
+   * @param i node index
+   * @return null if the node index is out of range, else the properties of the
+   * removed node
    */
   public synchronized DataNodeProperties stopDataNode(int i) {
     if (i < 0 || i >= dataNodes.size()) {
@@ -1941,18 +1957,20 @@ public class MiniDFSCluster {
 
   /*
    * Shutdown a datanode by name.
+   * @return the removed datanode or null if there was no match
    */
   public synchronized DataNodeProperties stopDataNode(String dnName) {
-    int i;
-    for (i = 0; i < dataNodes.size(); i++) {
+    int node = -1;
+    for (int i = 0; i < dataNodes.size(); i++) {
       DataNode dn = dataNodes.get(i).datanode;
       LOG.info("DN name=" + dnName + " found DN=" + dn +
           " with name=" + dn.getDisplayName());
       if (dnName.equals(dn.getDatanodeId().getXferAddr())) {
+        node = i;
         break;
       }
     }
-    return stopDataNode(i);
+    return stopDataNode(node);
   }
 
   /**
@@ -2526,8 +2544,8 @@ public class MiniDFSCluster {
       return null;
     }
     for (File f : files) {
-      if (f.getName().startsWith("blk_") && f.getName().endsWith(
-          Block.METADATA_EXTENSION)) {
+      if (f.getName().startsWith(Block.BLOCK_FILE_PREFIX) &&
+              f.getName().endsWith(Block.METADATA_EXTENSION)) {
         results.add(f);
       } else if (f.isDirectory()) {
         List<File> subdirResults = getAllBlockMetadataFiles(f);

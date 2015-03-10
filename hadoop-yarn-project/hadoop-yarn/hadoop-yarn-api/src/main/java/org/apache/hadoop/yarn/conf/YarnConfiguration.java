@@ -184,6 +184,12 @@ public class YarnConfiguration extends Configuration {
   public static final boolean DEFAULT_RM_SCHEDULER_USE_PORT_FOR_NODE_NAME = 
       false;
 
+  /** Enable Resource Manager webapp ui actions */
+  public static final String RM_WEBAPP_UI_ACTIONS_ENABLED =
+    RM_PREFIX + "webapp.ui-actions.enabled";
+  public static final boolean DEFAULT_RM_WEBAPP_UI_ACTIONS_ENABLED =
+    true;
+
   /** Whether the RM should enable Reservation System */
   public static final String RM_RESERVATION_SYSTEM_ENABLE = RM_PREFIX
       + "reservation-system.enable";
@@ -435,6 +441,8 @@ public class YarnConfiguration extends Configuration {
   public static final String DEFAULT_RM_CONFIGURATION_PROVIDER_CLASS =
       "org.apache.hadoop.yarn.LocalConfigurationProvider";
 
+  public static final String YARN_AUTHORIZATION_PROVIDER = YARN_PREFIX
+      + "authorization-provider";
   private static final List<String> RM_SERVICES_ADDRESS_CONF_KEYS_HTTP =
       Collections.unmodifiableList(Arrays.asList(
           RM_ADDRESS,
@@ -505,6 +513,15 @@ public class YarnConfiguration extends Configuration {
       + "fs.state-store.retry-policy-spec";
   public static final String DEFAULT_FS_RM_STATE_STORE_RETRY_POLICY_SPEC =
       "2000, 500";
+
+  public static final String FS_RM_STATE_STORE_NUM_RETRIES =
+      RM_PREFIX + "fs.state-store.num-retries";
+  public static final int DEFAULT_FS_RM_STATE_STORE_NUM_RETRIES = 0;
+
+  public static final String FS_RM_STATE_STORE_RETRY_INTERVAL_MS =
+      RM_PREFIX + "fs.state-store.retry-interval-ms";
+  public static final long DEFAULT_FS_RM_STATE_STORE_RETRY_INTERVAL_MS =
+      1000L;
 
   public static final String RM_LEVELDB_STORE_PATH = RM_PREFIX
       + "leveldb-state-store.path";
@@ -1000,7 +1017,28 @@ public class YarnConfiguration extends Configuration {
 
   public static final long DEFAULT_NM_LINUX_CONTAINER_CGROUPS_DELETE_TIMEOUT =
       1000;
-  
+
+  /**
+   * Delay between attempts to remove linux cgroup.
+   */
+  public static final String NM_LINUX_CONTAINER_CGROUPS_DELETE_DELAY =
+      NM_PREFIX + "linux-container-executor.cgroups.delete-delay-ms";
+
+  public static final long DEFAULT_NM_LINUX_CONTAINER_CGROUPS_DELETE_DELAY =
+      20;
+
+  /**
+   * Indicates if memory and CPU limits will be set for the Windows Job
+   * Object for the containers launched by the default container executor.
+   */
+  public static final String NM_WINDOWS_CONTAINER_MEMORY_LIMIT_ENABLED =
+      NM_PREFIX + "windows-container.memory-limit.enabled";
+  public static final boolean DEFAULT_NM_WINDOWS_CONTAINER_MEMORY_LIMIT_ENABLED = false;
+
+  public static final String NM_WINDOWS_CONTAINER_CPU_LIMIT_ENABLED =
+      NM_PREFIX + "windows-container.cpu-limit.enabled";
+  public static final boolean DEFAULT_NM_WINDOWS_CONTAINER_CPU_LIMIT_ENABLED = false;
+
   /** 
   /* The Windows group that the windows-secure-container-executor should run as.
   */
@@ -1205,6 +1243,11 @@ public class YarnConfiguration extends Configuration {
   public static final boolean
       DEFAULT_YARN_MINICLUSTER_CONTROL_RESOURCE_MONITORING = false;
 
+  /** Allow changing the memory for the NodeManager in the MiniYARNCluster */
+  public static final String YARN_MINICLUSTER_NM_PMEM_MB =
+      YARN_MC_PREFIX + YarnConfiguration.NM_PMEM_MB;
+  public static final int DEFAULT_YARN_MINICLUSTER_NM_PMEM_MB = 4 * 1024;
+
   /** The log directory for the containers */
   public static final String YARN_APP_CONTAINER_LOG_DIR =
       YARN_PREFIX + "app.container.log.dir";
@@ -1379,6 +1422,13 @@ public class YarnConfiguration extends Configuration {
 
   public static final long
       DEFAULT_TIMELINE_SERVICE_CLIENT_RETRY_INTERVAL_MS = 1000;
+
+  /** Timeline client policy for whether connections are fatal */
+  public static final String TIMELINE_SERVICE_CLIENT_BEST_EFFORT =
+      TIMELINE_SERVICE_CLIENT_PREFIX + "best-effort";
+
+  public static final boolean
+      DEFAULT_TIMELINE_SERVICE_CLIENT_BEST_EFFORT = false;
 
   /** Flag to enable recovery of timeline service */
   public static final String TIMELINE_SERVICE_RECOVERY_ENABLED =
@@ -1648,14 +1698,10 @@ public class YarnConfiguration extends Configuration {
   public static final String YARN_HTTP_POLICY_DEFAULT = HttpConfig.Policy.HTTP_ONLY
       .name();
   
-  public static final String NODE_LABELS_PREFIX = YARN_PREFIX + "node-labels.";
-
   /**
-   * Class for RMNodeLabelsManager Please note this value should be consistent
-   * in client nodes and RM node(s)
+   * Node-labels configurations
    */
-  public static final String RM_NODE_LABELS_MANAGER_CLASS = NODE_LABELS_PREFIX
-      + "manager-class";
+  public static final String NODE_LABELS_PREFIX = YARN_PREFIX + "node-labels.";
   
   /** URI for NodeLabelManager */
   public static final String FS_NODE_LABELS_STORE_ROOT_DIR = NODE_LABELS_PREFIX
@@ -1664,6 +1710,14 @@ public class YarnConfiguration extends Configuration {
       NODE_LABELS_PREFIX + "fs-store.retry-policy-spec";
   public static final String DEFAULT_FS_NODE_LABELS_STORE_RETRY_POLICY_SPEC =
       "2000, 500";
+  
+  /**
+   * Flag to indicate if the node labels feature enabled, by default it's
+   * disabled
+   */
+  public static final String NODE_LABELS_ENABLED = NODE_LABELS_PREFIX
+      + "enabled";
+  public static final boolean DEFAULT_NODE_LABELS_ENABLED = false;
 
   public YarnConfiguration() {
     super();

@@ -27,6 +27,7 @@ import org.apache.hadoop.metrics2.annotation.Metric;
 import org.apache.hadoop.metrics2.annotation.Metrics;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.metrics2.lib.MetricsRegistry;
+import org.apache.hadoop.metrics2.lib.MutableGaugeInt;
 import org.apache.hadoop.metrics2.lib.MutableStat;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 
@@ -41,11 +42,43 @@ import static org.apache.hadoop.metrics2.lib.Interns.info;
 @Metrics(context="container")
 public class ContainerMetrics implements MetricsSource {
 
+  public static final String PMEM_LIMIT_METRIC_NAME = "pMemLimitMBs";
+  public static final String VMEM_LIMIT_METRIC_NAME = "vMemLimitMBs";
+  public static final String VCORE_LIMIT_METRIC_NAME = "vCoreLimit";
+  public static final String PMEM_USAGE_METRIC_NAME = "pMemUsageMBs";
+  private static final String PHY_CPU_USAGE_METRIC_NAME = "pCpuUsagePercent";
+
+  // Use a multiplier of 1000 to avoid losing too much precision when
+  // converting to integers
+  private static final String VCORE_USAGE_METRIC_NAME = "milliVcoreUsage";
+
   @Metric
   public MutableStat pMemMBsStat;
 
+  // This tracks overall CPU percentage of the machine in terms of percentage
+  // of 1 core similar to top
+  // Thus if you use 2 cores completely out of 4 available cores this value
+  // will be 200
+  @Metric
+  public MutableStat cpuCoreUsagePercent;
+
+  @Metric
+  public MutableStat milliVcoresUsed;
+
+  @Metric
+  public MutableGaugeInt pMemLimitMbs;
+
+  @Metric
+  public MutableGaugeInt vMemLimitMbs;
+
+  @Metric
+  public MutableGaugeInt cpuVcoreLimit;
+
   static final MetricsInfo RECORD_INFO =
-      info("ContainerUsage", "Resource usage by container");
+      info("ContainerResource", "Resource limit and usage by container");
+
+  public static final MetricsInfo PROCESSID_INFO =
+      info("ContainerPid", "Container Process Id");
 
   final MetricsInfo recordInfo;
   final MetricsRegistry registry;
@@ -76,7 +109,19 @@ public class ContainerMetrics implements MetricsSource {
     scheduleTimerTaskIfRequired();
 
     this.pMemMBsStat = registry.newStat(
-        "pMem", "Physical memory stats", "Usage", "MBs", true);
+        PMEM_USAGE_METRIC_NAME, "Physical memory stats", "Usage", "MBs", true);
+    this.cpuCoreUsagePercent = registry.newStat(
+        PHY_CPU_USAGE_METRIC_NAME, "Physical Cpu core percent usage stats",
+        "Usage", "Percents", true);
+    this.milliVcoresUsed = registry.newStat(
+        VCORE_USAGE_METRIC_NAME, "1000 times Vcore usage", "Usage",
+        "MilliVcores", true);
+    this.pMemLimitMbs = registry.newGauge(
+        PMEM_LIMIT_METRIC_NAME, "Physical memory limit in MBs", 0);
+    this.vMemLimitMbs = registry.newGauge(
+        VMEM_LIMIT_METRIC_NAME, "Virtual memory limit in MBs", 0);
+    this.cpuVcoreLimit = registry.newGauge(
+        VCORE_LIMIT_METRIC_NAME, "CPU limit in number of vcores", 0);
   }
 
   ContainerMetrics tag(MetricsInfo info, ContainerId containerId) {
@@ -86,10 +131,6 @@ public class ContainerMetrics implements MetricsSource {
 
   static String sourceName(ContainerId containerId) {
     return RECORD_INFO.name() + "_" + containerId.toString();
-  }
-
-  public static ContainerMetrics forContainer(ContainerId containerId) {
-    return forContainer(containerId, -1L);
   }
 
   public static ContainerMetrics forContainer(
@@ -148,6 +189,22 @@ public class ContainerMetrics implements MetricsSource {
 
   public void recordMemoryUsage(int memoryMBs) {
     this.pMemMBsStat.add(memoryMBs);
+  }
+
+  public void recordCpuUsage(
+      int totalPhysicalCpuPercent, int milliVcoresUsed) {
+    this.cpuCoreUsagePercent.add(totalPhysicalCpuPercent);
+    this.milliVcoresUsed.add(milliVcoresUsed);
+  }
+
+  public void recordProcessId(String processId) {
+    registry.tag(PROCESSID_INFO, processId);
+  }
+
+  public void recordResourceLimit(int vmemLimit, int pmemLimit, int cpuVcores) {
+    this.vMemLimitMbs.set(vmemLimit);
+    this.pMemLimitMbs.set(pmemLimit);
+    this.cpuVcoreLimit.set(cpuVcores);
   }
 
   private synchronized void scheduleTimerTaskIfRequired() {

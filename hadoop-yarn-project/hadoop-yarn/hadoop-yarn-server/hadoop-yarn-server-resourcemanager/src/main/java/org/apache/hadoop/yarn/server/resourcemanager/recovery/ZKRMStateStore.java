@@ -30,6 +30,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import com.google.common.base.Preconditions;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
@@ -152,7 +153,13 @@ public class ZKRMStateStore extends RMStateStore {
 
   @VisibleForTesting
   protected ZooKeeper zkClient;
-  private ZooKeeper oldZkClient;
+
+  /* activeZkClient is not used to do actual operations,
+   * it is only used to verify client session for watched events and
+   * it gets activated into zkClient on connection event.
+   */
+  @VisibleForTesting
+  ZooKeeper activeZkClient;
 
   /** Fencing related variables */
   private static final String FENCING_LOCK = "RM_ZK_FENCING_LOCK";
@@ -275,7 +282,7 @@ public class ZKRMStateStore extends RMStateStore {
     createConnection();
 
     // ensure root dirs exist
-    createRootDir(znodeWorkingPath);
+    createRootDirRecursively(znodeWorkingPath);
     createRootDir(zkRootNodePath);
     if (HAUtil.isHAEnabled(getConfig())){
       fence();
@@ -354,21 +361,14 @@ public class ZKRMStateStore extends RMStateStore {
   }
 
   private synchronized void closeZkClients() throws IOException {
-    if (zkClient != null) {
+    zkClient = null;
+    if (activeZkClient != null) {
       try {
-        zkClient.close();
+        activeZkClient.close();
       } catch (InterruptedException e) {
         throw new IOException("Interrupted while closing ZK", e);
       }
-      zkClient = null;
-    }
-    if (oldZkClient != null) {
-      try {
-        oldZkClient.close();
-      } catch (InterruptedException e) {
-        throw new IOException("Interrupted while closing old ZK", e);
-      }
-      oldZkClient = null;
+      activeZkClient = null;
     }
   }
 
@@ -829,11 +829,16 @@ public class ZKRMStateStore extends RMStateStore {
    * hides the ZK methods of the store from its public interface
    */
   private final class ForwardingWatcher implements Watcher {
+    private ZooKeeper watchedZkClient;
+
+    public ForwardingWatcher(ZooKeeper client) {
+      this.watchedZkClient = client;
+    }
 
     @Override
     public void process(WatchedEvent event) {
       try {
-        ZKRMStateStore.this.processWatchEvent(event);
+        ZKRMStateStore.this.processWatchEvent(watchedZkClient, event);
       } catch (Throwable t) {
         LOG.error("Failed to process watcher event " + event + ": "
             + StringUtils.stringifyException(t));
@@ -844,8 +849,16 @@ public class ZKRMStateStore extends RMStateStore {
   @VisibleForTesting
   @Private
   @Unstable
-  public synchronized void processWatchEvent(WatchedEvent event)
-      throws Exception {
+  public synchronized void processWatchEvent(ZooKeeper zk,
+      WatchedEvent event) throws Exception {
+    // only process watcher event from current ZooKeeper Client session.
+    if (zk != activeZkClient) {
+      LOG.info("Ignore watcher event type: " + event.getType() +
+          " with state:" + event.getState() + " for path:" +
+          event.getPath() + " from old session");
+      return;
+    }
+
     Event.EventType eventType = event.getType();
     LOG.info("Watcher event type: " + eventType + " with state:"
         + event.getState() + " for path:" + event.getPath() + " for " + this);
@@ -856,17 +869,15 @@ public class ZKRMStateStore extends RMStateStore {
       switch (event.getState()) {
         case SyncConnected:
           LOG.info("ZKRMStateStore Session connected");
-          if (oldZkClient != null) {
+          if (zkClient == null) {
             // the SyncConnected must be from the client that sent Disconnected
-            zkClient = oldZkClient;
-            oldZkClient = null;
+            zkClient = activeZkClient;
             ZKRMStateStore.this.notifyAll();
             LOG.info("ZKRMStateStore Session restored");
           }
           break;
         case Disconnected:
           LOG.info("ZKRMStateStore Session disconnected");
-          oldZkClient = zkClient;
           zkClient = null;
           break;
         case Expired:
@@ -1099,7 +1110,8 @@ public class ZKRMStateStore extends RMStateStore {
     for (int retries = 0; retries < numRetries && zkClient == null;
         retries++) {
       try {
-        zkClient = getNewZooKeeper();
+        activeZkClient = getNewZooKeeper();
+        zkClient = activeZkClient;
         for (ZKUtil.ZKAuthInfo zkAuth : zkAuths) {
           zkClient.addAuthInfo(zkAuth.getScheme(), zkAuth.getAuth());
         }
@@ -1129,7 +1141,7 @@ public class ZKRMStateStore extends RMStateStore {
   protected synchronized ZooKeeper getNewZooKeeper()
       throws IOException, InterruptedException {
     ZooKeeper zk = new ZooKeeper(zkHostPort, zkSessionTimeout, null);
-    zk.register(new ForwardingWatcher());
+    zk.register(new ForwardingWatcher(zk));
     return zk;
   }
 
@@ -1143,4 +1155,18 @@ public class ZKRMStateStore extends RMStateStore {
     setDataWithRetries(amrmTokenSecretManagerRoot, stateData, -1);
   }
 
+  /**
+   * Utility function to ensure that the configured base znode exists.
+   * This recursively creates the znode as well as all of its parents.
+   */
+  private void createRootDirRecursively(String path) throws Exception {
+    String pathParts[] = path.split("/");
+    Preconditions.checkArgument(pathParts.length >= 1 && pathParts[0].isEmpty(),
+        "Invalid path: %s", path);
+    StringBuilder sb = new StringBuilder();
+    for (int i = 1; i < pathParts.length; i++) {
+      sb.append("/").append(pathParts[i]);
+      createRootDir(sb.toString());
+    }
+  }
 }

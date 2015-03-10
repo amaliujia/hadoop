@@ -26,7 +26,7 @@ import org.apache.hadoop.service.ServiceOperations;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.nodelabels.CommonNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContextImpl;
-import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.MemoryRMNodeLabelsManager;
+import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.NullRMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.security.ClientToAMTokenSecretManagerInRM;
 import org.apache.hadoop.yarn.server.resourcemanager.security.NMTokenSecretManagerInRM;
@@ -47,7 +47,7 @@ public class TestQueueParsing {
   
   @Before
   public void setup() {
-    nodeLabelManager = new MemoryRMNodeLabelsManager();
+    nodeLabelManager = new NullRMNodeLabelsManager();
     nodeLabelManager.init(new YarnConfiguration());
     nodeLabelManager.start();
   }
@@ -468,18 +468,18 @@ public class TestQueueParsing {
     // check capacity of A2
     CSQueue qA2 = capacityScheduler.getQueue("a2");
     Assert.assertEquals(0.7, qA2.getCapacity(), DELTA);
-    Assert.assertEquals(0.5, qA2.getCapacityByNodeLabel("red"), DELTA);
+    Assert.assertEquals(0.5, qA2.getQueueCapacities().getCapacity("red"), DELTA);
     Assert.assertEquals(0.07, qA2.getAbsoluteCapacity(), DELTA);
-    Assert.assertEquals(0.25, qA2.getAbsoluteCapacityByNodeLabel("red"), DELTA);
+    Assert.assertEquals(0.25, qA2.getQueueCapacities().getAbsoluteCapacity("red"), DELTA);
     Assert.assertEquals(0.1275, qA2.getAbsoluteMaximumCapacity(), DELTA);
-    Assert.assertEquals(0.3, qA2.getAbsoluteMaximumCapacityByNodeLabel("red"), DELTA);
+    Assert.assertEquals(0.3, qA2.getQueueCapacities().getAbsoluteMaximumCapacity("red"), DELTA);
     
     // check capacity of B3
     CSQueue qB3 = capacityScheduler.getQueue("b3");
     Assert.assertEquals(0.18, qB3.getAbsoluteCapacity(), DELTA);
-    Assert.assertEquals(0.125, qB3.getAbsoluteCapacityByNodeLabel("red"), DELTA);
+    Assert.assertEquals(0.125, qB3.getQueueCapacities().getAbsoluteCapacity("red"), DELTA);
     Assert.assertEquals(0.35, qB3.getAbsoluteMaximumCapacity(), DELTA);
-    Assert.assertEquals(1, qB3.getAbsoluteMaximumCapacityByNodeLabel("red"), DELTA);
+    Assert.assertEquals(1, qB3.getQueueCapacities().getAbsoluteMaximumCapacity("red"), DELTA);
   }
   
   private void
@@ -566,7 +566,7 @@ public class TestQueueParsing {
             new NMTokenSecretManagerInRM(csConf),
             new ClientToAMTokenSecretManagerInRM(), null);
     
-    RMNodeLabelsManager nodeLabelsManager = new MemoryRMNodeLabelsManager();
+    RMNodeLabelsManager nodeLabelsManager = new NullRMNodeLabelsManager();
     nodeLabelsManager.init(conf);
     nodeLabelsManager.start();
     
@@ -594,7 +594,7 @@ public class TestQueueParsing {
             new NMTokenSecretManagerInRM(csConf),
             new ClientToAMTokenSecretManagerInRM(), null);
     
-    RMNodeLabelsManager nodeLabelsManager = new MemoryRMNodeLabelsManager();
+    RMNodeLabelsManager nodeLabelsManager = new NullRMNodeLabelsManager();
     nodeLabelsManager.init(conf);
     nodeLabelsManager.start();
     
@@ -622,7 +622,7 @@ public class TestQueueParsing {
             new NMTokenSecretManagerInRM(csConf),
             new ClientToAMTokenSecretManagerInRM(), null);
     
-    RMNodeLabelsManager nodeLabelsManager = new MemoryRMNodeLabelsManager();
+    RMNodeLabelsManager nodeLabelsManager = new NullRMNodeLabelsManager();
     nodeLabelsManager.init(conf);
     nodeLabelsManager.start();
     
@@ -649,7 +649,7 @@ public class TestQueueParsing {
             new NMTokenSecretManagerInRM(csConf),
             new ClientToAMTokenSecretManagerInRM(), null);
     
-    RMNodeLabelsManager nodeLabelsManager = new MemoryRMNodeLabelsManager();
+    RMNodeLabelsManager nodeLabelsManager = new NullRMNodeLabelsManager();
     nodeLabelsManager.init(conf);
     nodeLabelsManager.start();
     
@@ -691,8 +691,8 @@ public class TestQueueParsing {
     
     // check root queue's capacity by label -- they should be all zero
     CSQueue root = capacityScheduler.getQueue(CapacitySchedulerConfiguration.ROOT);
-    Assert.assertEquals(0, root.getCapacityByNodeLabel("red"), DELTA);
-    Assert.assertEquals(0, root.getCapacityByNodeLabel("blue"), DELTA);
+    Assert.assertEquals(0, root.getQueueCapacities().getCapacity("red"), DELTA);
+    Assert.assertEquals(0, root.getQueueCapacities().getCapacity("blue"), DELTA);
 
     CSQueue a = capacityScheduler.getQueue("a");
     Assert.assertEquals(0.10, a.getAbsoluteCapacity(), DELTA);

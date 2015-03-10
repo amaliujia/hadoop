@@ -347,7 +347,7 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
     int numExpectedElements = 13;
     boolean isParentQueue = true;
     if (!info.has("queues")) {
-      numExpectedElements = 23;
+      numExpectedElements = 24;
       isParentQueue = false;
     }
     assertEquals("incorrect number of elements", numExpectedElements, info.length());
@@ -395,9 +395,9 @@ public class TestRMWebServicesCapacitySched extends JerseyTestBase {
     String qshortName = qArr[qArr.length - 1];
 
     assertEquals("usedCapacity doesn't match", 0, info.usedCapacity, 1e-3f);
-    assertEquals("capacity doesn't match", csConf.getCapacity(q),
+    assertEquals("capacity doesn't match", csConf.getNonLabeledQueueCapacity(q),
         info.capacity, 1e-3f);
-    float expectCapacity = csConf.getMaximumCapacity(q);
+    float expectCapacity = csConf.getNonLabeledQueueMaximumCapacity(q);
     float expectAbsMaxCapacity = parentAbsMaxCapacity * (info.maxCapacity/100);
     if (CapacitySchedulerConfiguration.UNDEFINED == expectCapacity) {
       expectCapacity = 100;

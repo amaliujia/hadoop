@@ -32,7 +32,7 @@ The specifics of using these filesystems are documented below.
 
 ## Warning: Object Stores are not filesystems.
 
-Amazon S3 is an example of "an object store". In order to achieve scalalablity
+Amazon S3 is an example of "an object store". In order to achieve scalability
 and especially high availability, S3 has —as many other cloud object stores have
 done— relaxed some of the constraints which classic "POSIX" filesystems promise.
 
@@ -141,12 +141,12 @@ If you do any of these: change your credentials immediately!
 ### Authentication properties
 
     <property>
-      <name>fs.s3a.awsAccessKeyId</name>
+      <name>fs.s3a.access.key</name>
       <description>AWS access key ID. Omit for Role-based authentication.</description>
     </property>
 
     <property>
-      <name>fs.s3a.awsSecretAccessKey</name>
+      <name>fs.s3a.secret.key</name>
       <description>AWS secret key. Omit for Role-based authentication.</description>
     </property>
 
@@ -165,15 +165,61 @@ If you do any of these: change your credentials immediately!
     </property>
 
     <property>
+      <name>fs.s3a.endpoint</name>
+      <description>AWS S3 endpoint to connect to. An up-to-date list is
+        provided in the AWS Documentation: regions and endpoints. Without this
+        property, the standard region (s3.amazonaws.com) is assumed.
+      </description>
+    </property>
+
+    <property>
+      <name>fs.s3a.proxy.host</name>
+      <description>Hostname of the (optional) proxy server for S3 connections.</description>
+    </property>
+
+    <property>
+      <name>fs.s3a.proxy.port</name>
+      <description>Proxy server port. If this property is not set
+        but fs.s3a.proxy.host is, port 80 or 443 is assumed (consistent with
+        the value of fs.s3a.connection.ssl.enabled).</description>
+    </property>
+
+    <property>
+      <name>fs.s3a.proxy.username</name>
+      <description>Username for authenticating with proxy server.</description>
+    </property>
+
+    <property>
+      <name>fs.s3a.proxy.password</name>
+      <description>Password for authenticating with proxy server.</description>
+    </property>
+
+    <property>
+      <name>fs.s3a.proxy.domain</name>
+      <description>Domain for authenticating with proxy server.</description>
+    </property>
+
+    <property>
+      <name>fs.s3a.proxy.workstation</name>
+      <description>Workstation for authenticating with proxy server.</description>
+    </property>
+
+    <property>
       <name>fs.s3a.attempts.maximum</name>
       <value>10</value>
       <description>How many times we should retry commands on transient errors.</description>
     </property>
 
     <property>
-      <name>fs.s3a.connection.timeout</name>
+      <name>fs.s3a.connection.establish.timeout</name>
       <value>5000</value>
-      <description>Socket connection timeout in seconds.</description>
+      <description>Socket connection setup timeout in milliseconds.</description>
+    </property>
+
+    <property>
+      <name>fs.s3a.connection.timeout</name>
+      <value>50000</value>
+      <description>Socket connection timeout in milliseconds.</description>
     </property>
 
     <property>
@@ -181,6 +227,33 @@ If you do any of these: change your credentials immediately!
       <value>5000</value>
       <description>How many keys to request from S3 when doing
          directory listings at a time.</description>
+    </property>
+
+    <property>
+      <name>fs.s3a.threads.max</name>
+      <value>256</value>
+      <description> Maximum number of concurrent active (part)uploads,
+      which each use a thread from the threadpool.</description>
+    </property>
+
+    <property>
+      <name>fs.s3a.threads.core</name>
+      <value>15</value>
+      <description>Number of core threads in the threadpool.</description>
+    </property>
+
+    <property>
+      <name>fs.s3a.threads.keepalivetime</name>
+      <value>60</value>
+      <description>Number of seconds a thread can be idle before being
+        terminated.</description>
+    </property>
+
+    <property>
+      <name>fs.s3a.max.total.tasks</name>
+      <value>1000</value>
+      <description>Number of (part)uploads allowed to the queue before
+      blocking additional uploads.</description>
     </property>
 
     <property>
@@ -219,7 +292,7 @@ If you do any of these: change your credentials immediately!
       <name>fs.s3a.buffer.dir</name>
       <value>${hadoop.tmp.dir}/s3a</value>
       <description>Comma separated list of directories that will be used to buffer file
-        uploads to.</description>
+        uploads to. No effect if fs.s3a.fast.upload is true.</description>
     </property>
 
     <property>
@@ -228,8 +301,45 @@ If you do any of these: change your credentials immediately!
       <description>The implementation class of the S3A Filesystem</description>
     </property>
 
+### S3AFastOutputStream
+ **Warning: NEW in hadoop 2.7. UNSTABLE, EXPERIMENTAL: use at own risk**
+
+    <property>
+      <name>fs.s3a.fast.upload</name>
+      <value>false</value>
+      <description>Upload directly from memory instead of buffering to
+      disk first. Memory usage and parallelism can be controlled as up to
+      fs.s3a.multipart.size memory is consumed for each (part)upload actively
+      uploading (fs.s3a.threads.max) or queueing (fs.s3a.max.total.tasks)</description>
+    </property>
+
+    <property>
+      <name>fs.s3a.fast.buffer.size</name>
+      <value>1048576</value>
+      <description>Size (in bytes) of initial memory buffer allocated for an
+      upload. No effect if fs.s3a.fast.upload is false.</description>
+    </property>
+
+Writes are buffered in memory instead of to a file on local disk. This
+removes the throughput bottleneck of the local disk write and read cycle
+before starting the actual upload. Furthermore, it allows handling files that
+are larger than the remaining local disk space.
+
+However, non-trivial memory tuning is needed for optimal results and careless
+settings could cause memory overflow. Up to `fs.s3a.threads.max` parallel
+(part)uploads are active. Furthermore, up to `fs.s3a.max.total.tasks`
+additional part(uploads) can be waiting (and thus memory buffers are created).
+The memory buffer is uploaded as a single upload if it is not larger than
+`fs.s3a.multipart.threshold`. Else, a multi-part upload is initiatated and
+parts of size `fs.s3a.multipart.size` are used to protect against overflowing
+the available memory. These settings should be tuned to the envisioned
+workflow (some large files, many small ones, ...) and the physical
+limitations of the machine and cluster (memory, network bandwidth).
 
 ## Testing the S3 filesystem clients
+
+Due to eventual consistency, tests may fail without reason. Transient
+failures, which no longer occur upon rerunning the test, should thus be ignored.
 
 To test the S3* filesystem clients, you need to provide two files
 which pass in authentication details to the test runner
@@ -256,7 +366,10 @@ each filesystem for its testing.
 2. `test.fs.s3.name` : the URL of the bucket for "S3"  tests
 
 The contents of each bucket will be destroyed during the test process:
-do not use the bucket for any purpose other than testing.
+do not use the bucket for any purpose other than testing. Furthermore, for
+s3a, all in-progress multi-part uploads to the bucket will be aborted at the
+start of a test (by forcing `fs.s3a.multipart.purge=true`) to clean up the
+temporary state of previously failed tests.
 
 Example:
 
@@ -274,7 +387,7 @@ Example:
     
       <property>
         <name>test.fs.s3.name</name>
-        <value>s3a://test-aws-s3/</value>
+        <value>s3://test-aws-s3/</value>
       </property>
   
       <property>
@@ -298,13 +411,13 @@ Example:
       </property>
 
       <property>
-        <name>fs.s3a.awsAccessKeyId</name>
+        <name>fs.s3a.access.key</name>
         <description>AWS access key ID. Omit for Role-based authentication.</description>
-        <value>DONOTPCOMMITTHISKEYTOSCM</value>
+        <value>DONOTCOMMITTHISKEYTOSCM</value>
       </property>
   
       <property>
-        <name>fs.s3a.awsSecretAccessKey</name>
+        <name>fs.s3a.secret.key</name>
         <description>AWS secret key. Omit for Role-based authentication.</description>
         <value>DONOTEVERSHARETHISSECRETKEY!</value>
       </property>
@@ -313,14 +426,14 @@ Example:
 ## File `contract-test-options.xml`
 
 The file `hadoop-tools/hadoop-aws/src/test/resources/contract-test-options.xml`
-must be created and configured for the test fileystems.
+must be created and configured for the test filesystems.
 
 If a specific file `fs.contract.test.fs.*` test path is not defined for
 any of the filesystems, those tests will be skipped.
 
 The standard S3 authentication details must also be provided. This can be
 through copy-and-paste of the `auth-keys.xml` credentials, or it can be
-through direct XInclude inclustion.
+through direct XInclude inclusion.
 
 #### s3://
 

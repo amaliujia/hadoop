@@ -23,6 +23,7 @@ import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.hdfs.web.resources.DelegationParam;
 import org.apache.hadoop.hdfs.web.resources.NamenodeAddressParam;
+import org.apache.hadoop.hdfs.web.resources.OffsetParam;
 import org.apache.hadoop.security.token.Token;
 import org.junit.Assert;
 import org.junit.Test;
@@ -51,5 +52,36 @@ public class TestParameterParser {
     ParameterParser testParser = new ParameterParser(decoder, conf);
     final Token<DelegationTokenIdentifier> tok2 = testParser.delegationToken();
     Assert.assertTrue(HAUtil.isTokenForLogicalUri(tok2));
+  }
+
+  @Test
+  public void testDecodePath() {
+    final String SCAPED_PATH = "hdfs-6662/test%25251%26%3Dtest?op=OPEN";
+    final String EXPECTED_PATH = "/hdfs-6662/test%251&=test";
+
+    Configuration conf = DFSTestUtil.newHAConfiguration(LOGICAL_NAME);
+    QueryStringDecoder decoder = new QueryStringDecoder(
+      WebHdfsHandler.WEBHDFS_PREFIX + "/"
+      + SCAPED_PATH);
+    ParameterParser testParser = new ParameterParser(decoder, conf);
+    Assert.assertEquals(EXPECTED_PATH, testParser.path());
+  }
+
+  @Test
+  public void testOffset() throws IOException {
+    final long X = 42;
+
+    long offset = new OffsetParam(Long.toString(X)).getOffset();
+    Assert.assertEquals("OffsetParam: ", X, offset);
+
+    offset = new OffsetParam((String) null).getOffset();
+    Assert.assertEquals("OffsetParam with null should have defaulted to 0", 0, offset);
+
+    try {
+      offset = new OffsetParam("abc").getValue();
+      Assert.fail("OffsetParam with nondigit value should have thrown IllegalArgumentException");
+    } catch (IllegalArgumentException iae) {
+      // Ignore
+    }
   }
 }

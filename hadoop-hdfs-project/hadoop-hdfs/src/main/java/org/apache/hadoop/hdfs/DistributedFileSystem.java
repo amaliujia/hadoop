@@ -60,6 +60,7 @@ import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.FsAction;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.client.HdfsAdmin;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
 import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
@@ -314,13 +315,62 @@ public class DistributedFileSystem extends FileSystem {
   @Override
   public FSDataOutputStream append(Path f, final int bufferSize,
       final Progressable progress) throws IOException {
+    return append(f, EnumSet.of(CreateFlag.APPEND), bufferSize, progress);
+  }
+
+  /**
+   * Append to an existing file (optional operation).
+   * 
+   * @param f the existing file to be appended.
+   * @param flag Flags for the Append operation. CreateFlag.APPEND is mandatory
+   *          to be present.
+   * @param bufferSize the size of the buffer to be used.
+   * @param progress for reporting progress if it is not null.
+   * @return Returns instance of {@link FSDataOutputStream}
+   * @throws IOException
+   */
+  public FSDataOutputStream append(Path f, final EnumSet<CreateFlag> flag,
+      final int bufferSize, final Progressable progress) throws IOException {
     statistics.incrementWriteOps(1);
     Path absF = fixRelativePart(f);
     return new FileSystemLinkResolver<FSDataOutputStream>() {
       @Override
       public FSDataOutputStream doCall(final Path p)
-          throws IOException, UnresolvedLinkException {
-        return dfs.append(getPathName(p), bufferSize, progress, statistics);
+          throws IOException {
+        return dfs.append(getPathName(p), bufferSize, flag, progress,
+            statistics);
+      }
+      @Override
+      public FSDataOutputStream next(final FileSystem fs, final Path p)
+          throws IOException {
+        return fs.append(p, bufferSize);
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * Append to an existing file (optional operation).
+   * 
+   * @param f the existing file to be appended.
+   * @param flag Flags for the Append operation. CreateFlag.APPEND is mandatory
+   *          to be present.
+   * @param bufferSize the size of the buffer to be used.
+   * @param progress for reporting progress if it is not null.
+   * @param favoredNodes Favored nodes for new blocks
+   * @return Returns instance of {@link FSDataOutputStream}
+   * @throws IOException
+   */
+  public FSDataOutputStream append(Path f, final EnumSet<CreateFlag> flag,
+      final int bufferSize, final Progressable progress,
+      final InetSocketAddress[] favoredNodes) throws IOException {
+    statistics.incrementWriteOps(1);
+    Path absF = fixRelativePart(f);
+    return new FileSystemLinkResolver<FSDataOutputStream>() {
+      @Override
+      public FSDataOutputStream doCall(final Path p)
+          throws IOException {
+        return dfs.append(getPathName(p), bufferSize, flag, progress,
+            statistics, favoredNodes);
       }
       @Override
       public FSDataOutputStream next(final FileSystem fs, final Path p)
@@ -346,9 +396,10 @@ public class DistributedFileSystem extends FileSystem {
    * Progressable)} with the addition of favoredNodes that is a hint to 
    * where the namenode should place the file blocks.
    * The favored nodes hint is not persisted in HDFS. Hence it may be honored
-   * at the creation time only. HDFS could move the blocks during balancing or
-   * replication, to move the blocks from favored nodes. A value of null means
-   * no favored nodes for this create
+   * at the creation time only. And with favored nodes, blocks will be pinned
+   * on the datanodes to prevent balancing move the block. HDFS could move the
+   * blocks during replication, to move the blocks from favored nodes. A value
+   * of null means no favored nodes for this create
    */
   public HdfsDataOutputStream create(final Path f,
       final FsPermission permission, final boolean overwrite,
@@ -630,7 +681,19 @@ public class DistributedFileSystem extends FileSystem {
   @Override
   public boolean truncate(Path f, final long newLength) throws IOException {
     statistics.incrementWriteOps(1);
-    return dfs.truncate(getPathName(f), newLength);
+    Path absF = fixRelativePart(f);
+    return new FileSystemLinkResolver<Boolean>() {
+      @Override
+      public Boolean doCall(final Path p)
+          throws IOException, UnresolvedLinkException {
+        return dfs.truncate(getPathName(p), newLength);
+      }
+      @Override
+      public Boolean next(final FileSystem fs, final Path p)
+          throws IOException {
+        return fs.truncate(p, newLength);
+      }
+    }.resolve(this, absF);
   }
 
   @Override
@@ -670,22 +733,51 @@ public class DistributedFileSystem extends FileSystem {
   }
 
   /** Set a directory's quotas
-   * @see org.apache.hadoop.hdfs.protocol.ClientProtocol#setQuota(String, long, long) 
+   * @see org.apache.hadoop.hdfs.protocol.ClientProtocol#setQuota(String, long, long, StorageType)
    */
   public void setQuota(Path src, final long namespaceQuota,
-      final long diskspaceQuota) throws IOException {
+      final long storagespaceQuota) throws IOException {
     Path absF = fixRelativePart(src);
     new FileSystemLinkResolver<Void>() {
       @Override
       public Void doCall(final Path p)
           throws IOException, UnresolvedLinkException {
-        dfs.setQuota(getPathName(p), namespaceQuota, diskspaceQuota);
+        dfs.setQuota(getPathName(p), namespaceQuota, storagespaceQuota);
         return null;
       }
       @Override
       public Void next(final FileSystem fs, final Path p)
           throws IOException {
         // setQuota is not defined in FileSystem, so we only can resolve
+        // within this DFS
+        return doCall(p);
+      }
+    }.resolve(this, absF);
+  }
+
+  /**
+   * Set the per type storage quota of a directory.
+   *
+   * @param src target directory whose quota is to be modified.
+   * @param type storage type of the specific storage type quota to be modified.
+   * @param quota value of the specific storage type quota to be modified.
+   * Maybe {@link HdfsConstants#QUOTA_RESET} to clear quota by storage type.
+   */
+  public void setQuotaByStorageType(
+    Path src, final StorageType type, final long quota)
+    throws IOException {
+    Path absF = fixRelativePart(src);
+    new FileSystemLinkResolver<Void>() {
+      @Override
+      public Void doCall(final Path p)
+        throws IOException, UnresolvedLinkException {
+        dfs.setQuotaByStorageType(getPathName(p), type, quota);
+        return null;
+      }
+      @Override
+      public Void next(final FileSystem fs, final Path p)
+        throws IOException {
+        // setQuotaByStorageType is not defined in FileSystem, so we only can resolve
         // within this DFS
         return doCall(p);
       }

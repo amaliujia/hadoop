@@ -31,6 +31,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.CapacitySchedule
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.CapacitySchedulerLeafQueueInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.CapacitySchedulerQueueInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.ResourceInfo;
+import org.apache.hadoop.yarn.server.webapp.AppsBlock;
 import org.apache.hadoop.yarn.webapp.ResponseInfo;
 import org.apache.hadoop.yarn.webapp.SubView;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet;
@@ -121,7 +122,8 @@ class CapacitySchedulerPage extends RmView {
           _("Configured Minimum User Limit Percent:", Integer.toString(lqinfo.getUserLimit()) + "%").
           _("Configured User Limit Factor:", String.format("%.1f", lqinfo.getUserLimitFactor())).
           _r("Active Users: ", activeUserList.toString()).
-          _("Accessible Node Labels:", StringUtils.join(",", lqinfo.getNodeLabels()));
+          _("Accessible Node Labels:", StringUtils.join(",", lqinfo.getNodeLabels())).
+          _("Preemption:", lqinfo.getPreemptionDisabled() ? "disabled" : "enabled");
 
       html._(InfoBlock.class);
 

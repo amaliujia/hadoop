@@ -83,7 +83,6 @@ import java.util.concurrent.Future;
 public class DataStorage extends Storage {
 
   public final static String BLOCK_SUBDIR_PREFIX = "subdir";
-  final static String BLOCK_FILE_PREFIX = "blk_";
   final static String COPY_FILE_PREFIX = "dncp_";
   final static String STORAGE_DIR_DETACHED = "detach";
   public final static String STORAGE_DIR_RBW = "rbw";
@@ -142,11 +141,20 @@ public class DataStorage extends Storage {
     this.datanodeUuid = newDatanodeUuid;
   }
 
-  /** Create an ID for this storage. */
-  public synchronized void createStorageID(StorageDirectory sd) {
-    if (sd.getStorageUuid() == null) {
+  /** Create an ID for this storage.
+   * @return true if a new storage ID was generated.
+   * */
+  public synchronized boolean createStorageID(
+      StorageDirectory sd, boolean regenerateStorageIds) {
+    final String oldStorageID = sd.getStorageUuid();
+    if (oldStorageID == null || regenerateStorageIds) {
       sd.setStorageUuid(DatanodeStorage.generateUuid());
+      LOG.info("Generated new storageID " + sd.getStorageUuid() +
+          " for directory " + sd.getRoot() +
+          (oldStorageID == null ? "" : (" to replace " + oldStorageID)));
+      return true;
     }
+    return false;
   }
 
   /**
@@ -413,15 +421,21 @@ public class DataStorage extends Storage {
       dataDirs.add(sl.getFile());
     }
 
-    for (BlockPoolSliceStorage bpsStorage : this.bpStorageMap.values()) {
-      bpsStorage.removeVolumes(dataDirs);
-    }
-
     StringBuilder errorMsgBuilder = new StringBuilder();
     for (Iterator<StorageDirectory> it = this.storageDirs.iterator();
          it.hasNext(); ) {
       StorageDirectory sd = it.next();
       if (dataDirs.contains(sd.getRoot())) {
+        // Remove the block pool level storage first.
+        for (Map.Entry<String, BlockPoolSliceStorage> entry :
+            this.bpStorageMap.entrySet()) {
+          String bpid = entry.getKey();
+          BlockPoolSliceStorage bpsStorage = entry.getValue();
+          File bpRoot =
+              BlockPoolSliceStorage.getBpRoot(bpid, sd.getCurrentDir());
+          bpsStorage.remove(bpRoot.getAbsoluteFile());
+        }
+
         it.remove();
         try {
           sd.unlock();
@@ -677,20 +691,25 @@ public class DataStorage extends Storage {
           + sd.getRoot().getCanonicalPath() + ": namenode clusterID = "
           + nsInfo.getClusterID() + "; datanode clusterID = " + getClusterID());
     }
-    
-    // After addition of the federation feature, ctime check is only 
-    // meaningful at BlockPoolSliceStorage level. 
 
-    // regular start up. 
+    // Clusters previously upgraded from layout versions earlier than
+    // ADD_DATANODE_AND_STORAGE_UUIDS failed to correctly generate a
+    // new storage ID. We check for that and fix it now.
+    boolean haveValidStorageId =
+        DataNodeLayoutVersion.supports(
+            LayoutVersion.Feature.ADD_DATANODE_AND_STORAGE_UUIDS, layoutVersion) &&
+            DatanodeStorage.isValidStorageId(sd.getStorageUuid());
+
+    // regular start up.
     if (this.layoutVersion == HdfsConstants.DATANODE_LAYOUT_VERSION) {
-      createStorageID(sd);
+      createStorageID(sd, !haveValidStorageId);
       return; // regular startup
     }
-    
+
     // do upgrade
     if (this.layoutVersion > HdfsConstants.DATANODE_LAYOUT_VERSION) {
       doUpgrade(datanode, sd, nsInfo);  // upgrade
-      createStorageID(sd);
+      createStorageID(sd, !haveValidStorageId);
       return;
     }
     
@@ -1230,7 +1249,7 @@ public class DataStorage extends Storage {
     String[] blockNames = from.list(new java.io.FilenameFilter() {
       @Override
       public boolean accept(File dir, String name) {
-        return name.startsWith(BLOCK_FILE_PREFIX);
+        return name.startsWith(Block.BLOCK_FILE_PREFIX);
       }
     });
 

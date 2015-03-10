@@ -74,11 +74,11 @@ import org.codehaus.jackson.map.JsonMappingException;
 import org.codehaus.jackson.map.ObjectMapper;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.microsoft.windowsazure.storage.AccessCondition;
-import com.microsoft.windowsazure.storage.OperationContext;
-import com.microsoft.windowsazure.storage.StorageException;
-import com.microsoft.windowsazure.storage.blob.CloudBlob;
-import com.microsoft.windowsazure.storage.core.*;
+import com.microsoft.azure.storage.AccessCondition;
+import com.microsoft.azure.storage.OperationContext;
+import com.microsoft.azure.storage.StorageException;
+import com.microsoft.azure.storage.blob.CloudBlob;
+import com.microsoft.azure.storage.core.*;
 
 /**
  * <p>
@@ -2040,7 +2040,37 @@ public class NativeAzureFileSystem extends FileSystem {
               createPermissionStatus(FsPermission.getDefault()));
         }
 
-        store.updateFolderLastModifiedTime(parentKey, null);
+        if (store.isAtomicRenameKey(parentKey)) {
+          SelfRenewingLease lease = null;
+          try {
+            lease = leaseSourceFolder(parentKey);
+            store.updateFolderLastModifiedTime(parentKey, lease);
+          } catch (AzureException e) {
+            String errorCode = "";
+            try {
+              StorageException e2 = (StorageException) e.getCause();
+              errorCode = e2.getErrorCode();
+            } catch (Exception e3) {
+              // do nothing if cast fails
+            }
+            if (errorCode.equals("BlobNotFound")) {
+              throw new FileNotFoundException("Folder does not exist: " + parentKey);
+            }
+            LOG.warn("Got unexpected exception trying to get lease on "
+                + parentKey + ". " + e.getMessage());
+            throw e;
+          } finally {
+            try {
+              if (lease != null) {
+                lease.free();
+              }
+            } catch (Exception e) {
+              LOG.error("Unable to free lease on " + parentKey, e);
+            }
+          }
+        } else {
+          store.updateFolderLastModifiedTime(parentKey, null);
+        }
       }
     }
   }

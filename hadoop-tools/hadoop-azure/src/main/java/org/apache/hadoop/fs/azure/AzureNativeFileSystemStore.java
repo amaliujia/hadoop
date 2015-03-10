@@ -65,23 +65,23 @@ import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.mortbay.util.ajax.JSON;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.microsoft.windowsazure.storage.CloudStorageAccount;
-import com.microsoft.windowsazure.storage.OperationContext;
-import com.microsoft.windowsazure.storage.RetryExponentialRetry;
-import com.microsoft.windowsazure.storage.RetryNoRetry;
-import com.microsoft.windowsazure.storage.StorageCredentials;
-import com.microsoft.windowsazure.storage.StorageCredentialsAccountAndKey;
-import com.microsoft.windowsazure.storage.StorageCredentialsSharedAccessSignature;
-import com.microsoft.windowsazure.storage.StorageErrorCode;
-import com.microsoft.windowsazure.storage.StorageException;
-import com.microsoft.windowsazure.storage.blob.BlobListingDetails;
-import com.microsoft.windowsazure.storage.blob.BlobProperties;
-import com.microsoft.windowsazure.storage.blob.BlobRequestOptions;
-import com.microsoft.windowsazure.storage.blob.CloudBlob;
-import com.microsoft.windowsazure.storage.blob.CopyStatus;
-import com.microsoft.windowsazure.storage.blob.DeleteSnapshotsOption;
-import com.microsoft.windowsazure.storage.blob.ListBlobItem;
-import com.microsoft.windowsazure.storage.core.Utility;
+import com.microsoft.azure.storage.CloudStorageAccount;
+import com.microsoft.azure.storage.OperationContext;
+import com.microsoft.azure.storage.RetryExponentialRetry;
+import com.microsoft.azure.storage.RetryNoRetry;
+import com.microsoft.azure.storage.StorageCredentials;
+import com.microsoft.azure.storage.StorageCredentialsAccountAndKey;
+import com.microsoft.azure.storage.StorageCredentialsSharedAccessSignature;
+import com.microsoft.azure.storage.StorageErrorCode;
+import com.microsoft.azure.storage.StorageException;
+import com.microsoft.azure.storage.blob.BlobListingDetails;
+import com.microsoft.azure.storage.blob.BlobProperties;
+import com.microsoft.azure.storage.blob.BlobRequestOptions;
+import com.microsoft.azure.storage.blob.CloudBlob;
+import com.microsoft.azure.storage.blob.CopyStatus;
+import com.microsoft.azure.storage.blob.DeleteSnapshotsOption;
+import com.microsoft.azure.storage.blob.ListBlobItem;
+import com.microsoft.azure.storage.core.Utility;
 
 /**
  * Core implementation of Windows Azure Filesystem for Hadoop.
@@ -387,9 +387,8 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
     if (null == instrumentation) {
       throw new IllegalArgumentException("Null instrumentation");
     }
-
     this.instrumentation = instrumentation;
-    this.bandwidthGaugeUpdater = new BandwidthGaugeUpdater(instrumentation);
+
     if (null == this.storageInteractionLayer) {
       this.storageInteractionLayer = new StorageInterfaceImpl();
     }
@@ -405,7 +404,13 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
     //
     if (null == conf) {
       throw new IllegalArgumentException(
-          "Cannot initialize WASB file system, URI is null");
+          "Cannot initialize WASB file system, conf is null");
+    }
+
+    if(!conf.getBoolean(
+        NativeAzureFileSystem.SKIP_AZURE_METRICS_PROPERTY_NAME, false)) {
+      //If not skip azure metrics, create bandwidthGaugeUpdater
+      this.bandwidthGaugeUpdater = new BandwidthGaugeUpdater(instrumentation);
     }
 
     // Incoming parameters validated. Capture the URI and the job configuration
@@ -789,8 +794,9 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
         STORAGE_EMULATOR_ACCOUNT_NAME_PROPERTY_NAME,
         DEFAULT_STORAGE_EMULATOR_ACCOUNT_NAME));
   }
-
-  static String getAccountKeyFromConfiguration(String accountName,
+  
+  @VisibleForTesting
+  public static String getAccountKeyFromConfiguration(String accountName,
       Configuration conf) throws KeyProviderException {
     String key = null;
     String keyProviderClass = conf.get(KEY_ACCOUNT_KEYPROVIDER_PREFIX
@@ -978,8 +984,8 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
   private String verifyAndConvertToStandardFormat(String rawDir) throws URISyntaxException {
     URI asUri = new URI(rawDir);
     if (asUri.getAuthority() == null 
-        || asUri.getAuthority().toLowerCase(Locale.US).equalsIgnoreCase(
-        		sessionUri.getAuthority().toLowerCase(Locale.US))) {
+        || asUri.getAuthority().toLowerCase(Locale.ENGLISH).equalsIgnoreCase(
+      sessionUri.getAuthority().toLowerCase(Locale.ENGLISH))) {
       // Applies to me.
       return trim(asUri.getPath(), "/");
     } else {
@@ -1781,11 +1787,14 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
           selfThrottlingWriteFactor);
     }
 
-    ResponseReceivedMetricUpdater.hook(
-        operationContext,
-        instrumentation,
-        bandwidthGaugeUpdater);
-    
+    if(bandwidthGaugeUpdater != null) {
+      //bandwidthGaugeUpdater is null when we config to skip azure metrics
+      ResponseReceivedMetricUpdater.hook(
+         operationContext,
+         instrumentation,
+         bandwidthGaugeUpdater);
+    }
+
     // Bind operation context to receive send request callbacks on this operation.
     // If reads concurrent to OOB writes are allowed, the interception will reset
     // the conditional header on all Azure blob storage read requests.
@@ -2534,7 +2543,8 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
     try {
       checkContainer(ContainerAccessType.ReadThenWrite);
       CloudBlobWrapper blob = getBlobReference(key);
-      blob.getProperties().setLastModified(lastModified);
+      //setLastModified function is not available in 2.0.0 version. blob.uploadProperties automatically updates last modified
+      //timestamp to current time
       blob.uploadProperties(getInstrumentedContext(), folderLease);
     } catch (Exception e) {
 
@@ -2560,7 +2570,10 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
 
   @Override
   public void close() {
-    bandwidthGaugeUpdater.close();
+    if(bandwidthGaugeUpdater != null) {
+      bandwidthGaugeUpdater.close();
+      bandwidthGaugeUpdater = null;
+    }
   }
   
   // Finalizer to ensure complete shutdown

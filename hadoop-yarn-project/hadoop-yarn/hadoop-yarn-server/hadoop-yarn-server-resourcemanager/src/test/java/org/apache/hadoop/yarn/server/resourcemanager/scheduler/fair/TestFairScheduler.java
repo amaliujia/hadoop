@@ -784,19 +784,18 @@ public class TestFairScheduler extends FairSchedulerTestBase {
 
   }
 
-  @Test (timeout = 5000)
-  public void testContainerReservationNotExceedingQueueMax() throws Exception {
+  @Test (timeout = 500000)
+  public void testContainerReservationAttemptExceedingQueueMax()
+      throws Exception {
     conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
     PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
     out.println("<?xml version=\"1.0\"?>");
     out.println("<allocations>");
     out.println("<queue name=\"root\">");
     out.println("<queue name=\"queue1\">");
-    out.println("<minResources>1024mb,5vcores</minResources>");
-    out.println("<maxResources>2048mb,10vcores</maxResources>");
+    out.println("<maxResources>2048mb,5vcores</maxResources>");
     out.println("</queue>");
     out.println("<queue name=\"queue2\">");
-    out.println("<minResources>1024mb,5vcores</minResources>");
     out.println("<maxResources>2048mb,10vcores</maxResources>");
     out.println("</queue>");
     out.println("</queue>");
@@ -806,7 +805,7 @@ public class TestFairScheduler extends FairSchedulerTestBase {
     scheduler.init(conf);
     scheduler.start();
     scheduler.reinitialize(conf, resourceManager.getRMContext());
-    
+
     // Add a node
     RMNode node1 =
         MockNodes
@@ -825,7 +824,64 @@ public class TestFairScheduler extends FairSchedulerTestBase {
         getResourceUsage().getMemory());
 
     // Now queue 2 requests likewise
-    ApplicationAttemptId attId = createSchedulingRequest(1024, "queue2", "user2", 1);
+    createSchedulingRequest(1024, "queue2", "user2", 1);
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // Make sure queue 2 is allocated app capacity
+    assertEquals(1024, scheduler.getQueueManager().getQueue("queue2").
+        getResourceUsage().getMemory());
+
+    ApplicationAttemptId attId1 = createSchedulingRequest(1024, "queue1", "user1", 1);
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // Ensure the reservation does not get created as allocated memory of
+    // queue1 exceeds max
+    assertEquals(0, scheduler.getSchedulerApp(attId1).
+        getCurrentReservation().getMemory());
+  }
+
+    @Test (timeout = 500000)
+  public void testContainerReservationNotExceedingQueueMax() throws Exception {
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println("<?xml version=\"1.0\"?>");
+    out.println("<allocations>");
+    out.println("<queue name=\"root\">");
+    out.println("<queue name=\"queue1\">");
+    out.println("<maxResources>3072mb,10vcores</maxResources>");
+    out.println("</queue>");
+    out.println("<queue name=\"queue2\">");
+    out.println("<maxResources>2048mb,10vcores</maxResources>");
+    out.println("</queue>");
+    out.println("</queue>");
+    out.println("</allocations>");
+    out.close();
+
+    scheduler.init(conf);
+    scheduler.start();
+    scheduler.reinitialize(conf, resourceManager.getRMContext());
+
+    // Add a node
+    RMNode node1 =
+        MockNodes
+            .newNodeInfo(1, Resources.createResource(3072, 5), 1, "127.0.0.1");
+    NodeAddedSchedulerEvent nodeEvent1 = new NodeAddedSchedulerEvent(node1);
+    scheduler.handle(nodeEvent1);
+
+    // Queue 1 requests full capacity of the queue
+    createSchedulingRequest(2048, "queue1", "user1", 1);
+    scheduler.update();
+    NodeUpdateSchedulerEvent updateEvent = new NodeUpdateSchedulerEvent(node1);
+    scheduler.handle(updateEvent);
+
+    // Make sure queue 1 is allocated app capacity
+    assertEquals(2048, scheduler.getQueueManager().getQueue("queue1").
+        getResourceUsage().getMemory());
+
+    // Now queue 2 requests likewise
+    createSchedulingRequest(1024, "queue2", "user2", 1);
     scheduler.update();
     scheduler.handle(updateEvent);
 
@@ -841,18 +897,34 @@ public class TestFairScheduler extends FairSchedulerTestBase {
     assertEquals(1024, scheduler.getSchedulerApp(attId1)
         .getCurrentReservation().getMemory());
 
-    // Now remove app of queue2
-    AppAttemptRemovedSchedulerEvent appRemovedEvent1 = new AppAttemptRemovedSchedulerEvent(
-        attId, RMAppAttemptState.FINISHED, false);
-    scheduler.update();
-    scheduler.handle(appRemovedEvent1);
+    // Exercise checks that reservation fits
+    scheduler.handle(updateEvent);
 
-    // Queue should have no apps
-    assertEquals(0, scheduler.getQueueManager().getQueue("queue2").
-        getResourceUsage().getMemory());
-    
+    // Ensure the reservation still exists as allocated memory of queue1 doesn't
+    // exceed max
+    assertEquals(1024, scheduler.getSchedulerApp(attId1).
+        getCurrentReservation().getMemory());
+
+    // Now reduce max Resources of queue1 down to 2048
+    out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println("<?xml version=\"1.0\"?>");
+    out.println("<allocations>");
+    out.println("<queue name=\"root\">");
+    out.println("<queue name=\"queue1\">");
+    out.println("<maxResources>2048mb,10vcores</maxResources>");
+    out.println("</queue>");
+    out.println("<queue name=\"queue2\">");
+    out.println("<maxResources>2048mb,10vcores</maxResources>");
+    out.println("</queue>");
+    out.println("</queue>");
+    out.println("</allocations>");
+    out.close();
+
+    scheduler.reinitialize(conf, resourceManager.getRMContext());
+
     createSchedulingRequest(1024, "queue2", "user2", 1);
     scheduler.handle(updateEvent);
+
     // Make sure allocated memory of queue1 doesn't exceed its maximum
     assertEquals(2048, scheduler.getQueueManager().getQueue("queue1").
         getResourceUsage().getMemory());
@@ -2216,7 +2288,315 @@ public class TestFairScheduler extends FairSchedulerTestBase {
     // Request should be fulfilled
     assertEquals(2, scheduler.getSchedulerApp(attId1).getLiveContainers().size());
   }
-  
+
+  @Test (timeout = 5000)
+  public void testIncreaseQueueMaxRunningAppsOnTheFly() throws Exception {
+  String allocBefore = "<?xml version=\"1.0\"?>" +
+        "<allocations>" +
+        "<queue name=\"root\">" +
+        "<queue name=\"queue1\">" +
+        "<maxRunningApps>1</maxRunningApps>" +
+        "</queue>" +
+        "</queue>" +
+        "</allocations>";
+
+    String allocAfter = "<?xml version=\"1.0\"?>" +
+        "<allocations>" +
+        "<queue name=\"root\">" +
+        "<queue name=\"queue1\">" +
+        "<maxRunningApps>3</maxRunningApps>" +
+        "</queue>" +
+        "</queue>" +
+        "</allocations>";
+
+    testIncreaseQueueSettingOnTheFlyInternal(allocBefore, allocAfter);
+  }
+
+  @Test (timeout = 5000)
+  public void testIncreaseUserMaxRunningAppsOnTheFly() throws Exception {
+    String allocBefore = "<?xml version=\"1.0\"?>"+
+        "<allocations>"+
+        "<queue name=\"root\">"+
+        "<queue name=\"queue1\">"+
+        "<maxRunningApps>10</maxRunningApps>"+
+        "</queue>"+
+        "</queue>"+
+        "<user name=\"user1\">"+
+        "<maxRunningApps>1</maxRunningApps>"+
+        "</user>"+
+        "</allocations>";
+
+    String allocAfter = "<?xml version=\"1.0\"?>"+
+        "<allocations>"+
+        "<queue name=\"root\">"+
+        "<queue name=\"queue1\">"+
+        "<maxRunningApps>10</maxRunningApps>"+
+        "</queue>"+
+        "</queue>"+
+        "<user name=\"user1\">"+
+        "<maxRunningApps>3</maxRunningApps>"+
+        "</user>"+
+        "</allocations>";
+
+    testIncreaseQueueSettingOnTheFlyInternal(allocBefore, allocAfter);
+  }
+
+  private void testIncreaseQueueSettingOnTheFlyInternal(String allocBefore,
+      String allocAfter) throws Exception {
+    // Set max running apps
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+
+    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println(allocBefore);
+    out.close();
+
+    scheduler.init(conf);
+    scheduler.start();
+    scheduler.reinitialize(conf, resourceManager.getRMContext());
+
+    // Add a node
+    RMNode node1 =
+        MockNodes
+            .newNodeInfo(1, Resources.createResource(8192, 8), 1, "127.0.0.1");
+    NodeAddedSchedulerEvent nodeEvent1 = new NodeAddedSchedulerEvent(node1);
+    scheduler.handle(nodeEvent1);
+
+    // Request for app 1
+    ApplicationAttemptId attId1 = createSchedulingRequest(1024, "queue1",
+        "user1", 1);
+
+    scheduler.update();
+    NodeUpdateSchedulerEvent updateEvent = new NodeUpdateSchedulerEvent(node1);
+    scheduler.handle(updateEvent);
+
+    // App 1 should be running
+    assertEquals(1, scheduler.getSchedulerApp(attId1).getLiveContainers().size());
+
+    ApplicationAttemptId attId2 = createSchedulingRequest(1024, "queue1",
+        "user1", 1);
+
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    ApplicationAttemptId attId3 = createSchedulingRequest(1024, "queue1",
+        "user1", 1);
+
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    ApplicationAttemptId attId4 = createSchedulingRequest(1024, "queue1",
+        "user1", 1);
+
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // App 2 should not be running
+    assertEquals(0, scheduler.getSchedulerApp(attId2).getLiveContainers().size());
+    // App 3 should not be running
+    assertEquals(0, scheduler.getSchedulerApp(attId3).getLiveContainers().size());
+    // App 4 should not be running
+    assertEquals(0, scheduler.getSchedulerApp(attId4).getLiveContainers().size());
+
+    out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println(allocAfter);
+    out.close();
+    scheduler.reinitialize(conf, resourceManager.getRMContext());
+
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // App 2 should be running
+    assertEquals(1, scheduler.getSchedulerApp(attId2).getLiveContainers().size());
+
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // App 3 should be running
+    assertEquals(1, scheduler.getSchedulerApp(attId3).getLiveContainers().size());
+
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // App 4 should not be running
+    assertEquals(0, scheduler.getSchedulerApp(attId4).getLiveContainers().size());
+
+    // Now remove app 1
+    AppAttemptRemovedSchedulerEvent appRemovedEvent1 = new AppAttemptRemovedSchedulerEvent(
+        attId1, RMAppAttemptState.FINISHED, false);
+
+    scheduler.handle(appRemovedEvent1);
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // App 4 should be running
+    assertEquals(1, scheduler.getSchedulerApp(attId4).getLiveContainers().size());
+  }
+
+  @Test (timeout = 5000)
+  public void testDecreaseQueueMaxRunningAppsOnTheFly() throws Exception {
+  String allocBefore = "<?xml version=\"1.0\"?>" +
+        "<allocations>" +
+        "<queue name=\"root\">" +
+        "<queue name=\"queue1\">" +
+        "<maxRunningApps>3</maxRunningApps>" +
+        "</queue>" +
+        "</queue>" +
+        "</allocations>";
+
+    String allocAfter = "<?xml version=\"1.0\"?>" +
+        "<allocations>" +
+        "<queue name=\"root\">" +
+        "<queue name=\"queue1\">" +
+        "<maxRunningApps>1</maxRunningApps>" +
+        "</queue>" +
+        "</queue>" +
+        "</allocations>";
+
+    testDecreaseQueueSettingOnTheFlyInternal(allocBefore, allocAfter);
+  }
+
+  @Test (timeout = 5000)
+  public void testDecreaseUserMaxRunningAppsOnTheFly() throws Exception {
+    String allocBefore = "<?xml version=\"1.0\"?>"+
+        "<allocations>"+
+        "<queue name=\"root\">"+
+        "<queue name=\"queue1\">"+
+        "<maxRunningApps>10</maxRunningApps>"+
+        "</queue>"+
+        "</queue>"+
+        "<user name=\"user1\">"+
+        "<maxRunningApps>3</maxRunningApps>"+
+        "</user>"+
+        "</allocations>";
+
+    String allocAfter = "<?xml version=\"1.0\"?>"+
+        "<allocations>"+
+        "<queue name=\"root\">"+
+        "<queue name=\"queue1\">"+
+        "<maxRunningApps>10</maxRunningApps>"+
+        "</queue>"+
+        "</queue>"+
+        "<user name=\"user1\">"+
+        "<maxRunningApps>1</maxRunningApps>"+
+        "</user>"+
+        "</allocations>";
+
+    testDecreaseQueueSettingOnTheFlyInternal(allocBefore, allocAfter);
+  }
+
+  private void testDecreaseQueueSettingOnTheFlyInternal(String allocBefore,
+      String allocAfter) throws Exception {
+    // Set max running apps
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+
+    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println(allocBefore);
+    out.close();
+
+    scheduler.init(conf);
+    scheduler.start();
+    scheduler.reinitialize(conf, resourceManager.getRMContext());
+
+    // Add a node
+    RMNode node1 =
+        MockNodes
+            .newNodeInfo(1, Resources.createResource(8192, 8), 1, "127.0.0.1");
+    NodeAddedSchedulerEvent nodeEvent1 = new NodeAddedSchedulerEvent(node1);
+    scheduler.handle(nodeEvent1);
+
+    // Request for app 1
+    ApplicationAttemptId attId1 = createSchedulingRequest(1024, "queue1",
+        "user1", 1);
+
+    scheduler.update();
+    NodeUpdateSchedulerEvent updateEvent = new NodeUpdateSchedulerEvent(node1);
+    scheduler.handle(updateEvent);
+
+    // App 1 should be running
+    assertEquals(1, scheduler.getSchedulerApp(attId1).getLiveContainers().size());
+
+    ApplicationAttemptId attId2 = createSchedulingRequest(1024, "queue1",
+        "user1", 1);
+
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    ApplicationAttemptId attId3 = createSchedulingRequest(1024, "queue1",
+        "user1", 1);
+
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    ApplicationAttemptId attId4 = createSchedulingRequest(1024, "queue1",
+        "user1", 1);
+
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // App 2 should be running
+    assertEquals(1, scheduler.getSchedulerApp(attId2).getLiveContainers().size());
+    // App 3 should be running
+    assertEquals(1, scheduler.getSchedulerApp(attId3).getLiveContainers().size());
+    // App 4 should not be running
+    assertEquals(0, scheduler.getSchedulerApp(attId4).getLiveContainers().size());
+
+    out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println(allocAfter);
+    out.close();
+    scheduler.reinitialize(conf, resourceManager.getRMContext());
+
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // App 2 should still be running
+    assertEquals(1, scheduler.getSchedulerApp(attId2).getLiveContainers().size());
+
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // App 3 should still be running
+    assertEquals(1, scheduler.getSchedulerApp(attId3).getLiveContainers().size());
+
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // App 4 should not be running
+    assertEquals(0, scheduler.getSchedulerApp(attId4).getLiveContainers().size());
+
+    // Now remove app 1
+    AppAttemptRemovedSchedulerEvent appRemovedEvent1 = new AppAttemptRemovedSchedulerEvent(
+        attId1, RMAppAttemptState.FINISHED, false);
+
+    scheduler.handle(appRemovedEvent1);
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // App 4 should not be running
+    assertEquals(0, scheduler.getSchedulerApp(attId4).getLiveContainers().size());
+
+    // Now remove app 2
+    appRemovedEvent1 = new AppAttemptRemovedSchedulerEvent(
+        attId2, RMAppAttemptState.FINISHED, false);
+
+    scheduler.handle(appRemovedEvent1);
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // App 4 should not be running
+    assertEquals(0, scheduler.getSchedulerApp(attId4).getLiveContainers().size());
+
+    // Now remove app 3
+    appRemovedEvent1 = new AppAttemptRemovedSchedulerEvent(
+        attId3, RMAppAttemptState.FINISHED, false);
+
+    scheduler.handle(appRemovedEvent1);
+    scheduler.update();
+    scheduler.handle(updateEvent);
+
+    // App 4 should be running now
+    assertEquals(1, scheduler.getSchedulerApp(attId4).getLiveContainers().size());
+  }
+
   @Test (timeout = 5000)
   public void testReservationWhileMultiplePriorities() throws IOException {
     scheduler.init(conf);
@@ -2257,10 +2637,9 @@ public class TestFairScheduler extends FairSchedulerTestBase {
     scheduler.handle(updateEvent);
     
     assertEquals(1, app.getLiveContainers().size());
-    // Reserved container should will be at higher priority,
-    // since old reservation cannot be satisfied
+    // Reserved container should still be at lower priority
     for (RMContainer container : app.getReservedContainers()) {
-      assertEquals(1, container.getReservedPriority().getPriority());
+      assertEquals(2, container.getReservedPriority().getPriority());
     }
     
     // Complete container
@@ -2273,11 +2652,12 @@ public class TestFairScheduler extends FairSchedulerTestBase {
     scheduler.update();
     scheduler.handle(updateEvent);
     
-    // Reserved container (at higher priority) should be run
+    // Reserved container (at lower priority) should be run
     Collection<RMContainer> liveContainers = app.getLiveContainers();
     assertEquals(1, liveContainers.size());
     for (RMContainer liveContainer : liveContainers) {
-      Assert.assertEquals(1, liveContainer.getContainer().getPriority().getPriority());
+      Assert.assertEquals(2, liveContainer.getContainer().getPriority()
+          .getPriority());
     }
     assertEquals(0, scheduler.getRootQueueMetrics().getAvailableMB());
     assertEquals(0, scheduler.getRootQueueMetrics().getAvailableVirtualCores());
